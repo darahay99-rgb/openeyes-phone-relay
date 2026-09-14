@@ -67,6 +67,26 @@ header small{display:block;margin-top:2px;color:#aaa;font-size:10px;font-weight:
 .rightBar button{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;padding:10px 4px;font-size:10px;min-height:68px;width:100%}
 .rightBar button .icon{font-size:19px;line-height:1}
 .rightBar button.active{background:#0b57d0;border-color:#4c8dff;color:#fff}
+/* ---- Phone rail: TikTok-style icons ---------------------------------------
+   Narrow screens only, so the PC viewer keeps its labelled buttons. The rail
+   loses its panel and border and floats over the 3D: no background box, no
+   text, just icons. The model gets the full width of the screen, which
+   matters most on a phone held in portrait. A drop shadow keeps the glyphs
+   readable over both the white cabinet and the dark background.            */
+@media (max-width:820px){
+  :root{--sidebar-w:60px}
+  .rightBar{background:transparent;border-left:none;padding:6px 4px;gap:14px;
+    justify-content:center;pointer-events:none}
+  .rightBar button{background:transparent;border:none;min-height:0;padding:4px 0;
+    width:100%;gap:0;pointer-events:auto;
+    filter:drop-shadow(0 1px 3px rgba(0,0,0,.95)) drop-shadow(0 0 1px rgba(0,0,0,.8))}
+  .rightBar button .lbl{display:none}
+  .rightBar button .icon{font-size:27px}
+  .rightBar button:active{transform:scale(.88)}
+  /* Active tool is shown by a tinted glyph rather than a filled box. */
+  .rightBar button.active{background:transparent;border:none;color:#4c8dff;
+    filter:drop-shadow(0 0 6px rgba(76,141,255,.85))}
+}
 .panel{position:absolute;z-index:8;left:0;right:var(--sidebar-w);bottom:0;max-height:24vh;overflow:auto;padding:7px 9px;border:1px solid #2c2c2c;border-top-width:1px;border-left:none;border-right:none;border-bottom:none;background:#000000b3;box-shadow:0 -4px 16px #0009;transition:max-height .15s ease,right .15s ease}
 .panel.collapsed{max-height:36px;overflow:hidden}
 .hidden{display:none!important}
@@ -2368,22 +2388,60 @@ async function startScan(){
   show('scanPanel');
   const help=document.getElementById('scanHelp');
   help.textContent='Point the camera at an OpenEyes Label.';
-  if(typeof jsQR!=='function'){help.textContent='QR scanning library failed to load. Type the Label ID in Search instead.';return}
+  if(typeof jsQR!=='function'&&!('BarcodeDetector' in window)){help.textContent='QR scanning is unavailable in this browser. Type the Label ID in Search instead.';return}
   const camProblem=scannerCameraProblem();
   if(camProblem){showPhotoScanFallback('Live camera preview is blocked on this HTTP LAN address. Tap TAKE PHOTO / SCAN QR — the phone camera will open and the QR will still select the exact 3D board.');return}
   document.getElementById('scanVideo').classList.remove('hidden');document.getElementById('scanPhotoBtn').classList.add('hidden');
   try{
     stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}}});
     const video=document.getElementById('scanVideo');video.srcObject=stream;
+    video.setAttribute('playsinline','');
+    try{await video.play()}catch(e){/* some browsers resolve play() late */}
+    // Wait for real frame dimensions before the first decode attempt.
+    for(let i=0;i<200&&!(video.videoWidth>0&&video.videoHeight>0);i++){
+      await new Promise(r=>setTimeout(r,50));
+    }
+    console.log('[OE-QR] camera ready',video.videoWidth+'x'+video.videoHeight);
     const canvas=ensureScanCanvas();
-    const tick=()=>{
-      if(!stream)return;
-      if(video.readyState===video.HAVE_ENOUGH_DATA&&video.videoWidth){
-        canvas.width=video.videoWidth;canvas.height=video.videoHeight;
-        scanCtx.drawImage(video,0,0,canvas.width,canvas.height);
+    let scanDetector=null;
+    try{
+      if('BarcodeDetector' in window){
+        const fmts=await window.BarcodeDetector.getSupportedFormats();
+        if(fmts&&fmts.indexOf('qr_code')>=0){
+          scanDetector=new window.BarcodeDetector({formats:['qr_code']});
+          console.log('[OE-QR] BarcodeDetector available');
+        }
+      }
+    }catch(e){scanDetector=null}
+    if(!scanDetector)console.log('[OE-QR] BarcodeDetector unavailable -> jsQR');
+    let scanBusy=false,lastDecodeAt=0;
+    // BarcodeDetector first, then jsQR on the SAME frame. An empty native
+    // result means "this decoder did not find it", never "nothing is there".
+    const decodeOneFrame=async()=>{
+      if(scanDetector){
         try{
-          const imageData=scanCtx.getImageData(0,0,canvas.width,canvas.height);
-          const result=jsQR(imageData.data,imageData.width,imageData.height,{inversionAttempts:'attemptBoth'});
+          const hits=await scanDetector.detect(video);
+          if(hits&&hits.length&&hits[0].rawValue)return hits[0].rawValue;
+        }catch(e){/* fall through to jsQR */}
+      }
+      if(typeof jsQR!=='function')return null;
+      canvas.width=video.videoWidth;canvas.height=video.videoHeight;
+      scanCtx.drawImage(video,0,0,canvas.width,canvas.height);
+      const d=scanCtx.getImageData(0,0,canvas.width,canvas.height);
+      const hit=jsQR(d.data,d.width,d.height,{inversionAttempts:'attemptBoth'});
+      return hit&&hit.data?hit.data:null;
+    };
+    const tick=async()=>{
+      if(!stream)return;
+      // Real readiness for pixel capture is the frame size. A live camera
+      // stream on Android commonly sits at HAVE_CURRENT_DATA (2) forever, so
+      // the old readyState===4 gate decoded ZERO frames over HTTPS.
+      const nowMs=Date.now();
+      if(!scanBusy&&nowMs-lastDecodeAt>=100&&video.videoWidth>0&&video.videoHeight>0&&video.readyState>=2){
+        scanBusy=true;lastDecodeAt=nowMs;
+        try{
+          const raw=await decodeOneFrame();
+          const result=raw?{data:raw}:null;
           if(result&&result.data){
             console.log('[OE-QR] QR decoded:',result.data);
             const id=labelIdFromScanValue(result.data);
@@ -2402,7 +2460,8 @@ async function startScan(){
               });
             }
           }
-        }catch(e){console.error('[OE-QR] jsQR/detection loop error:',e)}
+        }catch(e){console.error('[OE-QR] detection loop error:',e)}
+        finally{scanBusy=false}
       }
       requestAnimationFrame(tick)
     };
