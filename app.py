@@ -38,12 +38,17 @@ This file implements precisely the endpoints the existing viewer client in
   POST /api/session/{sid}/ack               PC reports FOUND / NOT_FOUND
   GET  /api/session/{sid}/ack?seq=N         phone waits for that verdict
   GET  /static/jsQR.js                      vendored QR decoder for the phone page
+  POST /api/publish/{token}                 PC uploads a cabinet (model + manifest)
+  GET  /p/{token}                           the phone's OWN full 3D viewer
   GET  /static/probe-qr.png                 known-good QR for the on-phone self test
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import hashlib
 import io
 import json
 import os
@@ -55,6 +60,7 @@ from urllib.parse import urlparse, parse_qs
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from phone_viewer import render_phone_viewer
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
@@ -63,7 +69,7 @@ from fastapi.responses import (
     StreamingResponse,
 )
 
-APP_VERSION = "1.6.0"
+APP_VERSION = "2.0.0"
 
 app = FastAPI(title="OpenEyes Phone Relay", version=APP_VERSION)
 
@@ -219,6 +225,119 @@ def _normalize_board_id(raw: str) -> str:
         except ValueError:
             pass
     return text
+
+
+# ---------------------------------------------------------------------------
+# PUBLISHED PROJECTS - the phone runs the full 3D viewer itself
+# ---------------------------------------------------------------------------
+# Until now the phone was only a scanner: it read a Board ID and pushed it to
+# the PC, and the PC did the 3D. That forces a worker to walk back to the PC
+# for every board. Publishing puts the SAME viewer on the phone.
+#
+# The PC uploads two small files once (a DAE/GLB plus its manifest - about
+# 0.2 MB for a 300-board unit, because boards are plain boxes with no
+# textures). The phone then opens /p/{token}, and after the first load the
+# service worker keeps the model on the device, so later opens work with a
+# weak signal or none at all.
+#
+# STORAGE: in memory for now. A redeploy or an idle container clears it and
+# the PC must publish again. Mount a Railway volume and set OPENEYES_DATA_DIR
+# to make it survive; the code below writes through to that directory when it
+# is set, so switching is a config change, not a rewrite.
+
+PUBLISH_TTL = int(os.environ.get("OPENEYES_PUBLISH_TTL", str(30 * 24 * 3600)))
+MAX_MODEL_BYTES = int(os.environ.get("OPENEYES_MAX_MODEL_BYTES", str(64 * 1024 * 1024)))
+DATA_DIR = os.environ.get("OPENEYES_DATA_DIR", "").strip()
+
+TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
+
+
+class Project:
+    """One published cabinet. Small enough to hold in memory comfortably."""
+
+    __slots__ = ("token", "title", "detail", "model_name", "model", "manifest",
+                 "version", "created", "last_seen")
+
+    def __init__(self, token: str) -> None:
+        now = time.time()
+        self.token = token
+        self.title = "OpenEyes Project"
+        self.detail = ""
+        self.model_name = "model.dae"
+        self.model = b""
+        self.manifest = b"{}"
+        self.version = ""
+        self.created = now
+        self.last_seen = now
+
+    def touch(self) -> None:
+        self.last_seen = time.time()
+
+    def expired(self, now: float | None = None) -> bool:
+        return (now or time.time()) - self.last_seen > PUBLISH_TTL
+
+
+PROJECTS: dict[str, Project] = {}
+
+
+def _project_dir(token: str) -> Path | None:
+    if not DATA_DIR:
+        return None
+    return Path(DATA_DIR) / "projects" / token
+
+
+def _persist(project: Project) -> None:
+    """Write through to disk when a volume is configured. Best effort."""
+    directory = _project_dir(project.token)
+    if directory is None:
+        return
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "meta.json").write_text(json.dumps({
+            "title": project.title, "detail": project.detail,
+            "model_name": project.model_name, "version": project.version,
+            "created": project.created,
+        }), encoding="utf-8")
+        (directory / "manifest.json").write_bytes(project.manifest)
+        (directory / project.model_name).write_bytes(project.model)
+    except OSError as exc:
+        print(f"[publish] could not persist {project.token}: {exc}", flush=True)
+
+
+def _restore(token: str) -> Project | None:
+    directory = _project_dir(token)
+    if directory is None or not (directory / "meta.json").is_file():
+        return None
+    try:
+        meta = json.loads((directory / "meta.json").read_text(encoding="utf-8"))
+        project = Project(token)
+        project.title = meta.get("title", project.title)
+        project.detail = meta.get("detail", "")
+        project.model_name = meta.get("model_name", "model.dae")
+        project.version = meta.get("version", "")
+        project.created = meta.get("created", time.time())
+        project.manifest = (directory / "manifest.json").read_bytes()
+        project.model = (directory / project.model_name).read_bytes()
+        PROJECTS[token] = project
+        return project
+    except (OSError, ValueError) as exc:
+        print(f"[publish] could not restore {token}: {exc}", flush=True)
+        return None
+
+
+def _get_project(token: str) -> Project:
+    if not TOKEN_RE.match(token or ""):
+        raise HTTPException(status_code=404, detail="Project not found")
+    now = time.time()
+    for dead in [t for t, p in PROJECTS.items() if p.expired(now)]:
+        PROJECTS.pop(dead, None)
+    project = PROJECTS.get(token) or _restore(token)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    project.touch()
+    return project
+
 
 
 # ---------------------------------------------------------------------------
@@ -478,6 +597,175 @@ async def get_ack(sid: str, seq: int = 0):
     session.touch()
     ack = session.ack if (session.ack and session.ack.get("seq", 0) >= seq) else None
     return {"ok": True, "ack": ack}
+
+
+# ---------------------------------------------------------------------------
+# Publish (PC -> relay) and the phone's own 3D viewer
+# ---------------------------------------------------------------------------
+@app.post("/api/publish/{token}")
+async def publish_project(token: str, request: Request):
+    """The PC uploads one cabinet: its model file and its manifest.
+
+    Deliberately a raw multipart-free JSON body so the PC side stays a single
+    requests/urllib call with no extra dependency. The model is base64 only
+    because a DAE is XML and a GLB is binary; at 0.2 MB the 33% overhead is
+    irrelevant and it keeps one code path for both formats.
+    """
+    if not TOKEN_RE.match(token or ""):
+        raise HTTPException(status_code=400, detail="Invalid project token")
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError):
+        raise HTTPException(status_code=400, detail="Body must be JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Body must be a JSON object")
+
+    model_name = str(body.get("model_name", "model.dae")).strip()
+    if not MODEL_NAME_RE.match(model_name):
+        raise HTTPException(status_code=400, detail="Invalid model_name")
+
+    try:
+        model = base64.b64decode(str(body.get("model_b64", "")), validate=True)
+    except (ValueError, binascii.Error):
+        raise HTTPException(status_code=400, detail="model_b64 is not valid base64")
+    if not model:
+        raise HTTPException(status_code=400, detail="model_b64 is empty")
+    if len(model) > MAX_MODEL_BYTES:
+        raise HTTPException(status_code=413, detail="Model is too large")
+
+    manifest_raw = body.get("manifest")
+    if isinstance(manifest_raw, (dict, list)):
+        manifest = json.dumps(manifest_raw, ensure_ascii=False).encode("utf-8")
+    else:
+        manifest = str(manifest_raw or "{}").encode("utf-8")
+    try:
+        json.loads(manifest)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="manifest is not valid JSON")
+
+    project = PROJECTS.get(token) or Project(token)
+    project.title = str(body.get("title", project.title))[:120] or "OpenEyes Project"
+    project.detail = str(body.get("detail", ""))[:160]
+    project.model_name = model_name
+    project.model = model
+    project.manifest = manifest
+    # Version is a content hash, so the phone's cache is only busted when the
+    # cabinet actually changed - the whole point of the immutable asset URL.
+    project.version = hashlib.sha256(model + manifest).hexdigest()[:12]
+    project.touch()
+    PROJECTS[token] = project
+    _persist(project)
+
+    print(f"[publish] {token} v{project.version} "
+          f"model={len(model)}B manifest={len(manifest)}B", flush=True)
+    return {
+        "ok": True,
+        "token": token,
+        "version": project.version,
+        "model_bytes": len(model),
+        "manifest_bytes": len(manifest),
+        "viewer_url": f"/p/{token}",
+        "persisted": bool(DATA_DIR),
+    }
+
+
+@app.get("/api/publish/{token}")
+def publish_status(token: str):
+    """Lets the PC check whether this cabinet is still published before
+    regenerating a QR, and lets you confirm a deploy did not wipe it."""
+    project = _get_project(token)
+    return {
+        "ok": True, "token": token, "version": project.version,
+        "title": project.title, "model_bytes": len(project.model),
+        "age_s": int(time.time() - project.created),
+    }
+
+
+@app.get("/p/{token}/manifest.json")
+def phone_manifest(token: str):
+    project = _get_project(token)
+    return Response(project.manifest, media_type="application/json",
+                    headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/p/{token}/model-{version}/{name}")
+def phone_model(token: str, version: str, name: str):
+    """Immutable per-version URL: the service worker caches this forever, and
+    a changed cabinet produces a different version, hence a different URL."""
+    project = _get_project(token)
+    if version != project.version or name != project.model_name:
+        raise HTTPException(status_code=404, detail="Model version not found")
+    media = ("model/gltf-binary" if name.lower().endswith(".glb")
+             else "model/vnd.collada+xml")
+    return Response(project.model, media_type=media, headers={
+        "Cache-Control": "public,max-age=31536000,immutable",
+        "ETag": project.version,
+    })
+
+
+@app.get("/p/{token}/sw.js")
+def phone_service_worker(token: str):
+    """Keeps each immutable model version on the phone after its first load,
+    so a worker on a weak signal still opens the cabinet instantly."""
+    script = r"""
+const CACHE='openeyes-phone-v1';
+self.addEventListener('install',e=>e.waitUntil(self.skipWaiting()));
+self.addEventListener('activate',e=>e.waitUntil(self.clients.claim()));
+self.addEventListener('fetch',e=>{
+  if(e.request.method!=='GET')return;
+  const url=new URL(e.request.url);
+  const immutable=url.pathname.includes('/model-');
+  if(immutable){
+    e.respondWith(caches.open(CACHE).then(async c=>{
+      const hit=await c.match(e.request);
+      if(hit)return hit;
+      const res=await fetch(e.request);
+      if(res.ok)c.put(e.request,res.clone());
+      return res;
+    }));
+    return;
+  }
+  if(url.pathname.startsWith('/p/')){
+    e.respondWith(caches.open(CACHE).then(async c=>{
+      try{
+        const res=await fetch(e.request);
+        if(res.ok)c.put(e.request,res.clone());
+        return res;
+      }catch(err){
+        return (await c.match(e.request))||Response.error();
+      }
+    }));
+  }
+});
+"""
+    return Response(script, media_type="application/javascript", headers={
+        "Cache-Control": "no-cache", "Service-Worker-Allowed": f"/p/{token}",
+    })
+
+
+@app.get("/p/{token}", response_class=HTMLResponse)
+def phone_viewer_page(token: str, part: str = ""):
+    """The phone's own 3D viewer.
+
+    This calls the SAME render_phone_viewer() the PC viewer and the Cloud
+    Live Library use, so Search, Dimension, Door, Hide, Animation and the
+    QR scanner behave identically. Only the asset URLs differ, which is
+    exactly why moving this to Cloud storage later is a config change.
+    """
+    project = _get_project(token)
+    if not project.model:
+        raise HTTPException(status_code=404, detail="Project has no model yet")
+    return HTMLResponse(render_phone_viewer(
+        project.title,
+        project.detail or "Phone • OpenEyes",
+        f"/p/{token}/model-{project.version}/{project.model_name}",
+        token,
+        initial_part=part,
+        manifest_url=f"/p/{token}/manifest.json",
+        service_worker=True,
+        print_url="",
+        jsqr_url="/jsQR.js",
+    ))
 
 
 @app.get("/scan")
