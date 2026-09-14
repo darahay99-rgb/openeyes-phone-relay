@@ -163,7 +163,7 @@ header small{display:block;margin-top:2px;color:#aaa;font-size:10px;font-weight:
 <div id="doorPanel" class="panel hidden"><div class="dimStatus" style="margin:0">Tap any board you want to use as a door. First tap registers it; each tap opens/closes it.</div></div>
 <div id="infoPanel" class="panel hidden"><button class="close" data-close="infoPanel">✕</button><div id="info" class="info"></div><div class="row"><button id="isolate">👁 Isolate</button><button id="showAll">↩ Show All</button><button id="assemblyStep">▶ Assembly Step</button></div></div>
 <div id="scanPanel" class="panel hidden"><button class="close" data-close="scanPanel">✕</button><h3>Scan QR / Barcode</h3><video id="scanVideo" class="scanVideo" autoplay playsinline></video><input id="scanPhotoInput" type="file" accept="image/*" capture="environment" class="hidden"><button id="scanPhotoBtn" class="hidden">📷 TAKE PHOTO / SCAN QR</button><p id="scanHelp">Point the camera at an OpenEyes Label.</p></div>
-<div id="pairPanel" class="panel hidden"><button class="close" data-close="pairPanel">✕</button><div class="panelHead"><h3>Pair a phone</h3></div><div class="pairWrap"><img id="pairQrImg" class="pairQr hidden" alt="Pairing QR"><div class="pairText"><div id="pairSteps"><b>1.</b> Open the phone camera and scan this QR <b>once</b>.<br><b>2.</b> The phone opens the OpenEyes scanner page.<br><b>3.</b> Scan any printed board label — this PC focuses that board automatically.</div><div class="pairNote" id="pairStatus" style="margin-top:6px"></div><div class="row" style="margin-top:7px"><button id="pairNewSession">↻ NEW SESSION</button><button id="pairRetry">⇄ RECONNECT</button></div><div class="pairNote" style="margin-top:6px">This pairing QR is temporary and belongs to this viewer session only. Printed board labels are different — they hold only a permanent Board ID and never expire.</div></div></div></div>
+<div id="pairPanel" class="panel hidden"><button class="close" data-close="pairPanel">✕</button><div class="panelHead"><h3>Open on a phone</h3></div><div class="pairWrap"><img id="pairQrImg" class="pairQr hidden" alt="Pairing QR"><div class="pairText"><div id="pairSteps"><b>1.</b> Open the phone camera and scan this QR <b>once</b>.<br><b>2.</b> The phone opens this cabinet in <b>3D on the phone itself</b>.<br><b>3.</b> In the phone viewer press SEARCH → SCAN QR, then scan any printed board label — that board is selected, highlighted and zoomed <b>on the phone</b>.</div><div class="pairNote" id="pairStatus" style="margin-top:6px"></div><div class="row" style="margin-top:7px"><button id="pairNewSession">↻ RE-PUBLISH</button><button id="pairRetry">⇄ RECONNECT</button></div><div class="pairNote" style="margin-top:6px">This QR carries the published project link. Printed board labels are different — they hold only a permanent Board ID and never expire.</div></div></div></div>
 <script src="__JSQR_URL__"></script>
 <script type="importmap">{"imports":{"three":"__MODULE_BASE__/build/three.module.js","three/addons/":"__MODULE_BASE__/examples/jsm/"}}</script><script type="module">
 import * as THREE from 'three';import{OrbitControls}from'three/addons/controls/OrbitControls.js';import{GLTFLoader}from'three/addons/loaders/GLTFLoader.js';import{ColladaLoader}from'three/addons/loaders/ColladaLoader.js';
@@ -2548,16 +2548,36 @@ document.getElementById('scan').onclick=startScan;
     return;
   }
 
-  function showPairingQr(){
+  // Publishing uploads this cabinet's model + manifest to the relay once, so
+  // the phone can run the 3D viewer itself. Roughly 0.2 MB for a 300-board
+  // unit; the phone caches it afterwards and works on a weak signal.
+  let publishedPhoneUrl='';
+  async function publishToPhone(){
     const img=document.getElementById('pairQrImg');
-    if(!sessionId){img.classList.add('hidden');return}
-    img.src=pairingQrUrl+'?session='+encodeURIComponent(sessionId);
-    img.classList.remove('hidden');
+    setPairStatus('Uploading this cabinet to the relay…');
+    try{
+      const r=await fetch('/local/publish/'+encodeURIComponent(token),{method:'POST'});
+      const j=await r.json().catch(()=>({}));
+      if(!r.ok){
+        img.classList.add('hidden');
+        setPairStatus('Could not publish: '+(j.detail||j.error||r.status));
+        return;
+      }
+      publishedPhoneUrl=j.phone_url||'';
+      img.src='/local/phone-qr.svg?project='+encodeURIComponent(token)+'&v='+encodeURIComponent(j.version||'');
+      img.classList.remove('hidden');
+      const kb=Math.round((j.model_bytes||0)/1024);
+      setPairStatus('Ready — '+kb+' KB published. Scan the QR with the phone camera.'
+        +(j.persisted?'':' (Relay stores this in memory: publish again if the relay restarts.)'));
+      console.log('[PHONE] published',j.version,j.phone_url);
+    }catch(e){
+      img.classList.add('hidden');
+      setPairStatus('Could not reach this PC to publish: '+(e&&e.message));
+    }
   }
   function openPairPanel(){
     show('pairPanel');
-    showPairingQr();
-    setPairStatus(sessionId?'Session ready. Scan this QR with the phone ONCE, then scan board labels from the page it opens.':'No relay session yet — press RECONNECT.');
+    publishToPhone();
   }
   chip.onclick=openPairPanel;
   pairBtn.onclick=openPairPanel;
@@ -2762,12 +2782,9 @@ document.getElementById('scan').onclick=startScan;
 
   document.getElementById('pairRetry').onclick=()=>{retry=0;transport='sse';connect();setPairStatus('Reconnecting…')};
   document.getElementById('pairNewSession').onclick=()=>{
-    // Unpair every phone from this viewer by abandoning the channel.
-    sessionStorage.removeItem(SESSION_STORE);
-    sessionId='';lastSeq=0;lastBoard='';retry=0;transport='sse';phonePaired=false;
-    setPhoneLine('Not paired','waitTxt','');
-    setPairStatus('Creating a new session — the old pairing QR is now dead.');
-    connect();
+    // Re-upload the cabinet. Needed after editing the model, or after the
+    // relay restarted and dropped its in-memory copy.
+    publishToPhone();
   };
   window.addEventListener('beforeunload',()=>{stopped=true;if(es)es.close();if(pollAbort){try{pollAbort.abort()}catch(e){}}});
 
