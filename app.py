@@ -63,7 +63,7 @@ from fastapi.responses import (
     StreamingResponse,
 )
 
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.6.0"
 
 app = FastAPI(title="OpenEyes Phone Relay", version=APP_VERSION)
 
@@ -81,7 +81,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-STATIC_DIR = Path(__file__).resolve().parent / "static"
+_APP_DIR = Path(__file__).resolve().parent
+STATIC_DIR = _APP_DIR / "static"
+
+
+def _find_jsqr() -> Path | None:
+    """Locate jsQR.js in any of the places an upload realistically puts it."""
+    for candidate in (STATIC_DIR / "jsQR.js", _APP_DIR / "jsQR.js",
+                      _APP_DIR / "static" / "jsqr.js", _APP_DIR / "jsqr.js"):
+        if candidate.is_file():
+            return candidate
+    return None
 
 # --- Tunables (override with Railway environment variables) ----------------
 SESSION_TTL = int(os.environ.get("OPENEYES_SESSION_TTL", "7200"))      # 2h idle
@@ -217,7 +227,7 @@ def _normalize_board_id(raw: str) -> str:
 @app.get("/health")
 def health():
     _sweep()
-    jsqr = STATIC_DIR / "jsQR.js"
+    jsqr = _find_jsqr()
     return {
         "ok": True,
         "service": "openeyes-phone-relay",
@@ -226,8 +236,10 @@ def health():
         "uptime_s": int(time.time() - START_TIME),
         # If jsqr_bytes is 0 or missing, static/jsQR.js did not reach the
         # deployment and the camera fallback cannot work. Check this first.
-        "jsqr_present": jsqr.is_file(),
-        "jsqr_bytes": jsqr.stat().st_size if jsqr.is_file() else 0,
+        "jsqr_present": jsqr is not None,
+        "jsqr_bytes": jsqr.stat().st_size if jsqr else 0,
+        # Where it was found, so a flattened upload is obvious at a glance.
+        "jsqr_path": (str(jsqr.relative_to(_APP_DIR)) if jsqr else None),
     }
 
 
@@ -273,16 +285,26 @@ def static_probe_qr():
                     headers={"Cache-Control": "no-store"})
 
 
-@app.get("/static/jsQR.js")
-def static_jsqr():
-    path = STATIC_DIR / "jsQR.js"
-    if not path.is_file():
+def _serve_jsqr():
+    path = _find_jsqr()
+    if path is None:
         raise HTTPException(status_code=404, detail="jsQR.js is not bundled")
     return FileResponse(
         path,
         media_type="application/javascript",
         headers={"Cache-Control": "public, max-age=86400"},
     )
+
+
+@app.get("/static/jsQR.js")
+def static_jsqr():
+    return _serve_jsqr()
+
+
+@app.get("/jsQR.js")
+def root_jsqr():
+    """Same file, root path — served so a flattened upload still works."""
+    return _serve_jsqr()
 
 
 # ---------------------------------------------------------------------------
@@ -576,18 +598,18 @@ button:active{opacity:.75}
 <main>
   <!-- AUTO MODE: everything a worker needs, and nothing else. -->
   <div id="auto">
-    <div id="autoState" class="idle">Starting camera\u2026</div>
-    <div id="autoId">\u2014</div>
+    <div id="autoState" class="idle">Starting camera…</div>
+    <div id="autoId">—</div>
     <div id="autoNote">Point the camera at a board label. It sends by itself.</div>
   </div>
 
-  <button id="debugToggle" class="sec" style="width:100%;margin-top:12px">\u2699 DEBUG</button>
+  <button id="debugToggle" class="sec" style="width:100%;margin-top:12px">⚙ DEBUG</button>
 
   <!-- DEBUG MODE: hidden by default, unchanged tooling. -->
   <div id="debug" class="hidden">
     <div id="result">
       <div class="lbl">Last board sent to the PC</div>
-      <div class="id" id="lastId">\u2014</div>
+      <div class="id" id="lastId">—</div>
       <div class="st wait" id="lastSt">Point the camera at a printed board label.</div>
     </div>
 
@@ -597,25 +619,25 @@ button:active{opacity:.75}
       <button id="send">SEND</button>
     </div>
     <div class="row">
-      <button id="camBtn" class="sec">\ud83d\udcf7 START CAMERA</button>
-      <button id="photoBtn" class="sec">\ud83d\uddbc PHOTO</button>
+      <button id="camBtn" class="sec">📷 START CAMERA</button>
+      <button id="photoBtn" class="sec">🖼 PHOTO</button>
     </div>
     <input id="photo" class="hidden" type="file" accept="image/*" capture="environment">
 
     <div id="diag">
-      <div><span class="dk">Camera</span><span class="dv" id="dCam">starting\u2026</span></div>
-      <div><span class="dk">Decoder</span><span class="dv" id="dDec">probing\u2026</span></div>
-      <div><span class="dk">QR detected</span><span class="dv" id="dRaw">\u2014</span></div>
-      <div><span class="dk">Board ID</span><span class="dv" id="dId">\u2014</span></div>
-      <div><span class="dk">Relay send</span><span class="dv" id="dSend">\u2014</span></div>
-      <div><span class="dk">PC result</span><span class="dv" id="dAck">\u2014</span></div>
+      <div><span class="dk">Camera</span><span class="dv" id="dCam">starting…</span></div>
+      <div><span class="dk">Decoder</span><span class="dv" id="dDec">probing…</span></div>
+      <div><span class="dk">QR detected</span><span class="dv" id="dRaw">—</span></div>
+      <div><span class="dk">Board ID</span><span class="dv" id="dId">—</span></div>
+      <div><span class="dk">Relay send</span><span class="dv" id="dSend">—</span></div>
+      <div><span class="dk">PC result</span><span class="dv" id="dAck">—</span></div>
       <div><span class="dk">Build</span><span class="dv" id="dBuild">__BUILD__</span></div>
     </div>
 
-    <button id="logToggle" class="sec" style="width:100%;margin-top:10px">\u25be SHOW SCAN TRACE</button>
+    <button id="logToggle" class="sec" style="width:100%;margin-top:10px">▾ SHOW SCAN TRACE</button>
     <pre id="logBox" class="hidden"></pre>
-    <div class="row"><button id="logCopy" class="sec hidden">\u29c9 COPY TRACE</button>
-         <button id="selftest" class="sec">\u2699 SELF TEST</button></div>
+    <div class="row"><button id="logCopy" class="sec hidden">⧉ COPY TRACE</button>
+         <button id="selftest" class="sec">⚙ SELF TEST</button></div>
   </div>
 
   <div class="hint">
@@ -952,14 +974,21 @@ async function ensureJsQR(){
   // failure here is indistinguishable from "the QR is unreadable".
   if(typeof jsQR==='function'){jsqrReady=true;return true}
   console.warn(LOG,'jsQR missing after page load - retrying once');
-  const ok=await new Promise(resolve=>{
-    const tag=document.createElement('script');
-    tag.src='/static/jsQR.js?retry='+Date.now();
-    tag.onload=()=>resolve(typeof jsQR==='function');
-    tag.onerror=()=>resolve(false);
-    document.head.appendChild(tag);
-    setTimeout(()=>resolve(typeof jsQR==='function'),8000);
-  });
+  // Try both locations: static/jsQR.js is the intended layout, /jsQR.js
+  // covers an upload that flattened the folder.
+  let ok=false;
+  for(const path of ['/static/jsQR.js','/jsQR.js']){
+    ok=await new Promise(resolve=>{
+      const tag=document.createElement('script');
+      tag.src=path+'?retry='+Date.now();
+      tag.onload=()=>resolve(typeof jsQR==='function');
+      tag.onerror=()=>resolve(false);
+      document.head.appendChild(tag);
+      setTimeout(()=>resolve(typeof jsQR==='function'),6000);
+    });
+    if(ok){console.log(LOG,'jsQR loaded from '+path);break}
+    console.warn(LOG,'jsQR not available at '+path);
+  }
   jsqrReady=ok;
   if(!ok)console.warn(LOG,'jsQR fallback not loaded (check /static/jsQR.js). '+
     'Not fatal while BarcodeDetector works.');
