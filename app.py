@@ -35,6 +35,8 @@ This file implements precisely the endpoints the existing viewer client in
   GET  /api/session/{sid}/poll?after=N      PC long poll -> {events:[...]}
   GET  /scan?session={sid}                  phone scanner page (pairing QR target)
   POST /api/session/{sid}/scan              phone submits a Board ID
+  POST /api/session/{sid}/ack               PC reports FOUND / NOT_FOUND
+  GET  /api/session/{sid}/ack?seq=N         phone waits for that verdict
   GET  /static/jsQR.js                      vendored QR decoder for the phone page
   GET  /static/probe-qr.png                 known-good QR for the on-phone self test
 """
@@ -61,7 +63,7 @@ from fastapi.responses import (
     StreamingResponse,
 )
 
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 
 app = FastAPI(title="OpenEyes Phone Relay", version=APP_VERSION)
 
@@ -86,6 +88,9 @@ SESSION_TTL = int(os.environ.get("OPENEYES_SESSION_TTL", "7200"))      # 2h idle
 MAX_EVENTS = int(os.environ.get("OPENEYES_MAX_EVENTS", "200"))         # ring size
 MAX_SESSIONS = int(os.environ.get("OPENEYES_MAX_SESSIONS", "500"))     # abuse cap
 POLL_TIMEOUT = int(os.environ.get("OPENEYES_POLL_TIMEOUT", "25"))      # long poll
+ACK_RESULTS = {"RECEIVED", "FOUND", "SELECTED", "NOT_FOUND"}
+ACK_TIMEOUT = int(os.environ.get("OPENEYES_ACK_TIMEOUT", "8"))
+
 SSE_HEARTBEAT = int(os.environ.get("OPENEYES_SSE_HEARTBEAT", "20"))    # keep alive
 
 # A Board ID is short, printable and has no spaces. This is a sanity filter,
@@ -98,7 +103,8 @@ SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
 class Session:
     """One PC viewer window. Lives in memory only."""
 
-    __slots__ = ("sid", "created", "last_seen", "phone_paired", "events", "seq", "signal")
+    __slots__ = ("sid", "created", "last_seen", "phone_paired", "events", "seq",
+                 "signal", "ack", "ack_signal")
 
     def __init__(self, sid: str) -> None:
         now = time.time()
@@ -110,6 +116,11 @@ class Session:
         self.seq = 0
         # Set whenever a new scan arrives; SSE and long poll both wait on it.
         self.signal = asyncio.Event()
+        # The PC viewer's verdict for the most recent scan. This is what lets
+        # the phone say "board selected on the PC" instead of the much weaker
+        # "the relay accepted my POST".
+        self.ack: dict | None = None
+        self.ack_signal = asyncio.Event()
 
     def touch(self) -> None:
         self.last_seen = time.time()
@@ -129,6 +140,7 @@ class Session:
         if len(self.events) > MAX_EVENTS:
             del self.events[: len(self.events) - MAX_EVENTS]
         self.phone_paired = True
+        self.ack = None
         self.touch()
         # Wake every waiter, then immediately re-arm for the next scan.
         self.signal.set()
@@ -137,6 +149,18 @@ class Session:
 
     def since(self, after: int) -> list[dict]:
         return [e for e in self.events if e["seq"] > after]
+
+    def set_ack(self, seq: int, board_id: str, result: str) -> dict:
+        self.ack = {
+            "seq": seq,
+            "board_id": board_id,
+            "result": result,
+            "ts": int(time.time()),
+        }
+        self.touch()
+        self.ack_signal.set()
+        self.ack_signal = asyncio.Event()
+        return self.ack
 
 
 SESSIONS: dict[str, Session] = {}
@@ -389,6 +413,51 @@ async def mark_paired(sid: str):
     return {"ok": True, "phone_paired": True}
 
 
+@app.post("/api/session/{sid}/ack")
+async def post_ack(sid: str, request: Request):
+    """The PC viewer reports what it actually did with a scanned Board ID.
+
+    This is the difference between the phone claiming "Sent to PC" (which only
+    means the relay accepted a POST) and "Selected on PC" (which means the 3D
+    viewer really found and focused that board). Purely additive: a PC that
+    never calls this keeps working exactly as before, and the phone simply
+    falls back to reporting the send.
+    """
+    session = _get(sid)
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError):
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+
+    result = str(body.get("result", "")).strip().upper()
+    if result not in ACK_RESULTS:
+        raise HTTPException(status_code=400, detail="result must be one of " + ", ".join(sorted(ACK_RESULTS)))
+    try:
+        seq = int(body.get("seq", 0))
+    except (TypeError, ValueError):
+        seq = 0
+    board_id = _normalize_board_id(str(body.get("board_id", "")))
+    return {"ok": True, "ack": session.set_ack(seq, board_id, result)}
+
+
+@app.get("/api/session/{sid}/ack")
+async def get_ack(sid: str, seq: int = 0):
+    """The phone waits here for the PC's verdict on the scan it just sent."""
+    session = _get(sid)
+    if session.ack and session.ack.get("seq", 0) >= seq:
+        return {"ok": True, "ack": session.ack}
+    waiter = session.ack_signal
+    try:
+        await asyncio.wait_for(waiter.wait(), timeout=ACK_TIMEOUT)
+    except asyncio.TimeoutError:
+        pass
+    session.touch()
+    ack = session.ack if (session.ack and session.ack.get("seq", 0) >= seq) else None
+    return {"ok": True, "ack": ack}
+
+
 @app.get("/scan")
 def scan_page(session: str = ""):
     """The page the PC's pairing QR points at.
@@ -478,6 +547,19 @@ button:active{opacity:.75}
 #diag .dk{color:#8a8a94;flex:0 0 96px}
 #diag .dv{color:#d6d6de;font-family:ui-monospace,Menlo,Consolas,monospace;
   word-break:break-all;flex:1}
+#auto{background:#16161a;border:1px solid #2a2a30;border-radius:16px;padding:20px 16px;
+  text-align:center}
+#autoState{font-size:15px;font-weight:700;letter-spacing:.3px}
+#autoState.idle{color:#8a8a94}
+#autoState.scan{color:#e3b341}
+#autoState.send{color:#58a6ff}
+#autoState.ok{color:#7ee787}
+#autoState.bad{color:#ff7b72}
+#autoId{font-size:26px;font-weight:800;margin:10px 0 6px;word-break:break-all;
+  line-height:1.2;color:#f2f2f2}
+#autoNote{font-size:13px;color:#8a8a94;line-height:1.5}
+#debug #result{display:block}
+#debug #diag{display:flex;flex-direction:column}
 #verBadge{font-size:11px;font-weight:600;color:#0d0d0f;background:#7ee787;
   border-radius:6px;padding:2px 7px;margin-left:7px;vertical-align:middle}
 #logBox{margin-top:10px;background:#050506;border:1px solid #24242a;border-radius:10px;
@@ -492,36 +574,49 @@ button:active{opacity:.75}
 <div id="wrap"><video id="v" playsinline muted autoplay></video><div id="frame"></div></div>
 
 <main>
-  <div id="result">
-    <div class="lbl">Last board sent to the PC</div>
-    <div class="id" id="lastId">—</div>
-    <div class="st wait" id="lastSt">Point the camera at a printed board label.</div>
+  <!-- AUTO MODE: everything a worker needs, and nothing else. -->
+  <div id="auto">
+    <div id="autoState" class="idle">Starting camera\u2026</div>
+    <div id="autoId">\u2014</div>
+    <div id="autoNote">Point the camera at a board label. It sends by itself.</div>
   </div>
 
-  <div id="diag">
-    <div><span class="dk">Camera</span><span class="dv" id="dCam">starting…</span></div>
-    <div><span class="dk">Decoder</span><span class="dv" id="dDec">probing…</span></div>
-    <div><span class="dk">QR detected</span><span class="dv" id="dRaw">—</span></div>
-    <div><span class="dk">Board ID</span><span class="dv" id="dId">—</span></div>
-    <div><span class="dk">Relay send</span><span class="dv" id="dSend">—</span></div>
-    <div><span class="dk">Build</span><span class="dv" id="dBuild">__BUILD__</span></div>
-  </div>
+  <button id="debugToggle" class="sec" style="width:100%;margin-top:12px">\u2699 DEBUG</button>
 
-  <button id="logToggle" class="sec" style="width:100%;margin-top:10px">▾ SHOW LOG</button>
-  <pre id="logBox" class="hidden"></pre>
-  <div class="row"><button id="logCopy" class="sec hidden">⧉ COPY LOG</button>
-       <button id="selftest" class="sec">⚙ SELF TEST</button></div>
+  <!-- DEBUG MODE: hidden by default, unchanged tooling. -->
+  <div id="debug" class="hidden">
+    <div id="result">
+      <div class="lbl">Last board sent to the PC</div>
+      <div class="id" id="lastId">\u2014</div>
+      <div class="st wait" id="lastSt">Point the camera at a printed board label.</div>
+    </div>
 
-  <div class="row">
-    <input id="manual" placeholder="Or type a Board ID" autocomplete="off"
-           autocapitalize="off" autocorrect="off" spellcheck="false">
-    <button id="send">SEND</button>
+    <div class="row">
+      <input id="manual" placeholder="Or type a Board ID" autocomplete="off"
+             autocapitalize="off" autocorrect="off" spellcheck="false">
+      <button id="send">SEND</button>
+    </div>
+    <div class="row">
+      <button id="camBtn" class="sec">\ud83d\udcf7 START CAMERA</button>
+      <button id="photoBtn" class="sec">\ud83d\uddbc PHOTO</button>
+    </div>
+    <input id="photo" class="hidden" type="file" accept="image/*" capture="environment">
+
+    <div id="diag">
+      <div><span class="dk">Camera</span><span class="dv" id="dCam">starting\u2026</span></div>
+      <div><span class="dk">Decoder</span><span class="dv" id="dDec">probing\u2026</span></div>
+      <div><span class="dk">QR detected</span><span class="dv" id="dRaw">\u2014</span></div>
+      <div><span class="dk">Board ID</span><span class="dv" id="dId">\u2014</span></div>
+      <div><span class="dk">Relay send</span><span class="dv" id="dSend">\u2014</span></div>
+      <div><span class="dk">PC result</span><span class="dv" id="dAck">\u2014</span></div>
+      <div><span class="dk">Build</span><span class="dv" id="dBuild">__BUILD__</span></div>
+    </div>
+
+    <button id="logToggle" class="sec" style="width:100%;margin-top:10px">\u25be SHOW SCAN TRACE</button>
+    <pre id="logBox" class="hidden"></pre>
+    <div class="row"><button id="logCopy" class="sec hidden">\u29c9 COPY TRACE</button>
+         <button id="selftest" class="sec">\u2699 SELF TEST</button></div>
   </div>
-  <div class="row">
-    <button id="camBtn" class="sec">📷 START CAMERA</button>
-    <button id="photoBtn" class="sec">🖼 PHOTO</button>
-  </div>
-  <input id="photo" class="hidden" type="file" accept="image/*" capture="environment">
 
   <div class="hint">
     Keep this page open. Every label you scan is sent straight to the paired PC,
@@ -590,13 +685,14 @@ const video=document.getElementById('v'),
 const canvas=document.createElement('canvas');
 const ctx=canvas.getContext('2d',{willReadFrequently:true});
 
-let stream=null,starting=false,scanning=false,loopRunning=false,decodeBusy=false,
+let stream=null,starting=false,scanning=false,loopRunning=false,decodeBusy=false,sendInFlight=false,
     lastSent='',lastSentAt=0,everSent=false,lastDecodeAt=0;
 
 // Native BarcodeDetector: fastest and most tolerant on Samsung Internet
 // and Chrome for Android. Probed once; if the probe or the detector
 // itself misbehaves we fall through to jsQR permanently.
-let detector=null,detectorEmpty=0,detectorErrors=0,dupLogged='',jsqrReady=false,decodeCount=0;
+let detector=null,detectorEmpty=0,detectorErrors=0,dupLogged='',jsqrReady=false,
+    decodeCount=0,activeDecoder='';
 const DECODE_INTERVAL_MS=100;      // ~10 decodes/sec is plenty and cheap
 const SAME_ID_COOLDOWN_MS=2000;    // duplicate protection
 const MAX_DECODE_EDGE=1280;        // cap the buffer we hand to jsQR
@@ -607,6 +703,36 @@ function setResult(id,msg,cls){
   lastSt.textContent=msg;lastSt.className='st '+(cls||'wait');
 }
 function setDiag(id,text){const el=document.getElementById(id);if(el)el.textContent=text}
+
+// --- AUTO mode status -------------------------------------------------------
+function setAuto(state,cls,id,note){
+  const st=document.getElementById('autoState'),
+        el=document.getElementById('autoId'),
+        nt=document.getElementById('autoNote');
+  if(st){st.textContent=state;st.className=cls||'idle'}
+  if(el&&id!==undefined)el.textContent=id||'\u2014';
+  if(nt&&note!==undefined)nt.textContent=note;
+}
+
+// --- scan trace -------------------------------------------------------------
+// Each scan gets a number and every stage is recorded against it:
+//   DETECT -> NORMALIZE -> SEND -> RELAY -> PC. A scan that fails shows
+//   exactly which stage it stopped at.
+let scanNo=0,traceT0=0;
+function traceStart(raw,decoder){
+  scanNo++;traceT0=Date.now();
+  console.log(LOG,'--- SCAN #'+scanNo+' -------------------------------');
+  console.log(LOG,'#'+scanNo+' DETECT    raw="'+raw+'" via '+decoder);
+  return scanNo;
+}
+function trace(n,stage,detail){
+  const ms=traceT0?(Date.now()-traceT0):0;
+  console.log(LOG,'#'+n+' '+stage.padEnd(9)+' '+detail+'  (+'+ms+'ms)');
+}
+function traceFail(n,stage,detail){
+  const ms=traceT0?(Date.now()-traceT0):0;
+  console.warn(LOG,'#'+n+' '+stage.padEnd(9)+' FAILED: '+detail+'  (+'+ms+'ms)');
+}
 function setScanningIdle(){
   // Never clobber a successful "Sent to PC" line with routine scan chatter.
   if(!everSent)setResult('','Scanning\u2026 point the camera at a board label.','wait');
@@ -626,54 +752,110 @@ function labelIdFromScanValue(value){
 
 // --- send a Board ID to the relay -------------------------------------------
 async function send(rawValue,source){
-  const id=labelIdFromScanValue(rawValue);
-  if(!id)return;
-  const now=Date.now();
-  // Duplicate protection: the camera sees the same label dozens of times
-  // per second. A DIFFERENT id is always sent immediately.
-  if(id===lastSent&&now-lastSentAt<SAME_ID_COOLDOWN_MS){
-    // Log once per streak, not once per frame.
-    if(dupLogged!==id){dupLogged=id;console.log(LOG,'Duplicate ignored:',id)}
+  const raw=String(rawValue||'');
+  const id=labelIdFromScanValue(raw);
+  const n=traceStart(raw,source);
+
+  // --- validation: never forward junk to the PC ---------------------------
+  if(!id){traceFail(n,'NORMALIZE','decoded value is empty');return}
+  if(id==='undefined'||id==='null'){traceFail(n,'NORMALIZE','literal "'+id+'"');return}
+  if(id.length>128){traceFail(n,'NORMALIZE','too long ('+id.length+' chars)');return}
+  if(!/^[A-Za-z0-9._:\-]+$/.test(id)){
+    traceFail(n,'NORMALIZE','not a Board ID: "'+id.slice(0,40)+'"');
+    setAuto('Not a board label','bad','\u2014','That QR is not an OpenEyes board label.');
     return;
   }
+  trace(n,'NORMALIZE','id="'+id+'"');
+  setDiag('dRaw',raw);setDiag('dId',id);
+
+  // --- duplicate protection ----------------------------------------------
+  const now=Date.now();
+  if(id===lastSent&&now-lastSentAt<SAME_ID_COOLDOWN_MS){
+    if(dupLogged!==id){dupLogged=id;trace(n,'SKIP','duplicate within '+SAME_ID_COOLDOWN_MS+'ms')}
+    scanNo--;                       // a skipped scan does not consume a number
+    return;
+  }
+  if(sendInFlight){trace(n,'SKIP','a send is already in flight');scanNo--;return}
   dupLogged='';
   lastSent=id;lastSentAt=now;
-  console.log(LOG,'Detected:',id);
-  console.log(LOG,'Sending:',id);
+
+  sendInFlight=true;
+  setAuto('Sending to PC\u2026','send',id,'Board detected. Contacting the PC.');
   setResult(id,'Sending\u2026','wait');
+  trace(n,'SEND','POST /api/session/\u2026/scan');
+  let seq=0;
   try{
     const r=await fetch('/api/session/'+encodeURIComponent(SESSION)+'/scan',{
       method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({board_id:id,source:source||'phone'})
     });
     if(r.status===404){
+      traceFail(n,'RELAY','session expired (404)');
       setState('session expired','bad');
-      setResult(id,'Pairing expired \u2014 rescan the PC pairing QR.','bad');
       setDiag('dSend','FAILED (session expired)');
-      console.warn(LOG,'Session expired');
+      setResult(id,'Pairing expired \u2014 rescan the PC pairing QR.','bad');
+      setAuto('Pairing expired','bad',id,'Scan the pairing QR on the PC again.');
+      lastSent='';
       return;
     }
     if(!r.ok){
       const j=await r.json().catch(()=>({}));
-      setResult(id,'Rejected: '+(j.error||j.detail||r.status),'bad');
-      setDiag('dSend','FAILED ('+(j.error||j.detail||r.status)+')');
-      console.warn(LOG,'Rejected:',id,j);
-      // Let the user retry the same label straight away.
+      const why=j.error||j.detail||r.status;
+      traceFail(n,'RELAY','HTTP '+r.status+' '+why);
+      setDiag('dSend','FAILED ('+why+')');
+      setResult(id,'Rejected: '+why,'bad');
+      setAuto('Could not send','bad',id,'Relay rejected it. Retrying on next scan.');
       lastSent='';
       return;
     }
+    const j=await r.json().catch(()=>({}));
+    seq=j.seq||0;
+    trace(n,'RELAY','accepted, seq='+seq);
     everSent=true;
     setState('connected','ok');
-    setResult(id,'Sent to PC \u2713','ok');
     setDiag('dSend','OK ('+id+')');
-    console.log(LOG,'Sent successfully');
+    setResult(id,'Sent to PC \u2713','ok');
     if(navigator.vibrate)navigator.vibrate(60);
   }catch(e){
+    traceFail(n,'RELAY','network error: '+(e&&e.message));
     lastSent='';
     setState('offline','bad');
-    setResult(id,'Network error \u2014 check signal and try again.','bad');
     setDiag('dSend','FAILED (network)');
-    console.warn(LOG,'Send failed:',e&&e.message);
+    setResult(id,'Network error \u2014 check signal and try again.','bad');
+    setAuto('No connection','bad',id,'Check mobile data or Wi-Fi.');
+    return;
+  }finally{
+    sendInFlight=false;
+  }
+
+  // --- wait for the PC's real verdict -------------------------------------
+  // "Sent to PC" only means the relay accepted a POST. The line below waits
+  // for the viewer to say whether it actually found and focused the board.
+  setAuto('Waiting for PC\u2026','send',id,'Relay delivered it. Waiting for the 3D viewer.');
+  trace(n,'PC','waiting for viewer verdict');
+  try{
+    const a=await fetch('/api/session/'+encodeURIComponent(SESSION)+
+                        '/ack?seq='+encodeURIComponent(seq),{method:'GET'});
+    const aj=await a.json().catch(()=>({}));
+    const ack=aj&&aj.ack;
+    if(!ack){
+      trace(n,'PC','no verdict (older PC build, or viewer busy)');
+      setDiag('dAck','no reply');
+      setAuto('Sent to PC \u2713','ok',id,'Delivered. This PC build does not report back.');
+      return;
+    }
+    trace(n,'PC',ack.result+' for '+ack.board_id);
+    setDiag('dAck',ack.result);
+    if(ack.result==='NOT_FOUND'){
+      setAuto('Board not found','bad',id,'This board is not in the model open on the PC.');
+    }else{
+      setAuto('Selected on PC \u2713','ok',id,'The 3D viewer highlighted and focused this board.');
+      if(navigator.vibrate)navigator.vibrate([40,60,40]);
+    }
+  }catch(e){
+    trace(n,'PC','verdict unavailable: '+(e&&e.message));
+    setDiag('dAck','unavailable');
+    setAuto('Sent to PC \u2713','ok',id,'Delivered, but the PC did not report back.');
   }
 }
 
@@ -746,18 +928,19 @@ async function decodeFrame(){
       return hits[0].rawValue;
     }
     detectorEmpty++;
-    // Roughly 8 seconds of finding nothing, or repeated throws, and we stop
-    // paying for the native call every frame and let jsQR own the loop.
-    if(detectorEmpty>=80||detectorErrors>=5){
+    // Only hand the loop to jsQR if jsQR actually exists. Demoting into a
+    // fallback that is not loaded leaves ZERO decoders and silently kills
+    // scanning until the camera is restarted.
+    if((detectorEmpty>=80||detectorErrors>=5)&&jsqrReady){
       detector=null;
-      console.warn(LOG,'BarcodeDetector produced nothing -> jsQR only');
-      setDiag('dDec', jsqrReady?'jsQR (BarcodeDetector gave up)':'jsQR NOT LOADED');
+      console.warn(LOG,'BarcodeDetector produced nothing -> switching to jsQR');
+      setDecoderLine();
     }
     // fall through to jsQR on this same frame
   }
 
   const raw=decodeWithJsQR(video,video.videoWidth,video.videoHeight);
-  if(raw)setDiag('dDec','jsQR');
+  if(raw){activeDecoder='jsQR';setDecoderLine()}
   return raw;
 }
 
@@ -778,7 +961,8 @@ async function ensureJsQR(){
     setTimeout(()=>resolve(typeof jsQR==='function'),8000);
   });
   jsqrReady=ok;
-  if(!ok)console.error(LOG,'jsQR not loaded - check /static/jsQR.js on the relay');
+  if(!ok)console.warn(LOG,'jsQR fallback not loaded (check /static/jsQR.js). '+
+    'Not fatal while BarcodeDetector works.');
   return ok;
 }
 
@@ -802,11 +986,18 @@ async function probeDetector(){
 }
 
 function describeDecoders(){
-  if(detector&&jsqrReady)return 'BarcodeDetector + jsQR';
-  if(detector)return 'BarcodeDetector (jsQR NOT loaded)';
+  // activeDecoder is set the moment a decoder actually produces a result, so
+  // after the first scan this reports fact rather than capability.
+  if(activeDecoder)
+    return activeDecoder+' \u2713  (fallback: '+(jsqrReady?'jsQR ready':'jsQR unavailable')+')';
+  if(detector&&jsqrReady)return 'BarcodeDetector, fallback jsQR';
+  if(detector)return 'BarcodeDetector  (fallback: jsQR unavailable)';
   if(jsqrReady)return 'jsQR';
-  return 'Decoder error: jsQR not loaded';
+  return 'NO DECODER \u2014 BarcodeDetector missing and jsQR not loaded';
 }
+function setDecoderLine(){setDiag('dDec',describeDecoders())}
+
+function decodersAvailable(){return !!detector||jsqrReady}
 
 function waitForVideoDimensions(){
   // Do NOT gate on readyState===HAVE_ENOUGH_DATA. On Android/Samsung a live
@@ -842,12 +1033,14 @@ async function startCameraInner(){
               'getUserMedia='+!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia));
   if(!window.isSecureContext){
     setDiag('dCam','blocked (not HTTPS)');
+    setAuto('Camera blocked','bad','\u2014','Open the https:// relay address, not an IP.');
     setResult('','Camera needs HTTPS. Open the relay https:// address, not an IP.','bad');
     console.error(LOG,'not a secure context - getUserMedia is unavailable');
     return;
   }
   if(!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia)){
     setDiag('dCam','unsupported browser');
+    setAuto('Browser not supported','bad','\u2014','Open this link in Chrome.');
     setResult('','This browser has no camera API. Open the link in Chrome.','bad');
     console.error(LOG,'navigator.mediaDevices.getUserMedia missing');
     return;
@@ -882,15 +1075,19 @@ async function startCameraInner(){
 
     await probeDetector();
     await ensureJsQR();
-    setDiag('dDec',describeDecoders());
-    if(!detector&&!jsqrReady){
-      setResult('','Decoder error: jsQR not loaded. Reload the page, or type the Board ID.','bad');
+    setDecoderLine();
+    if(detector&&!jsqrReady){
+      console.log(LOG,'jsQR unavailable, but BarcodeDetector is present - this is fine');
+    }
+    if(!decodersAvailable()){
+      setResult('','No QR decoder on this browser. Open the link in Chrome, or type the Board ID.','bad');
       return;
     }
 
     scanning=true;
     document.getElementById('camBtn').textContent='\u23f9 STOP CAMERA';
     setScanningIdle();
+    setAuto('Ready to scan','scan','\u2014','Point the camera at a board label. It sends by itself.');
     startLoop();
   }catch(e){
     stream=null;
@@ -903,6 +1100,7 @@ async function startCameraInner(){
       : 'Camera unavailable ('+name+'). Use PHOTO or type the Board ID.';
     setResult('',msg,'bad');
     setDiag('dCam','failed ('+name+')');
+    setAuto('Camera blocked','bad','\u2014',msg);
   }
 }
 
@@ -912,6 +1110,7 @@ function stopCamera(){
   video.srcObject=null;
   document.getElementById('camBtn').textContent='\ud83d\udcf7 START CAMERA';
   setDiag('dCam','stopped');
+  setAuto('Camera stopped','idle','\u2014','Open DEBUG and press START CAMERA.');
   console.log(LOG,'Camera stopped');
 }
 document.getElementById('camBtn').onclick=()=>{stream?stopCamera():startCamera()};
@@ -975,7 +1174,7 @@ async function pump(){
   if(decodeCount%50===0){
     console.log(LOG,'scanning... attempts='+decodeCount,
                 'frame='+video.videoWidth+'x'+video.videoHeight,
-                'decoder='+(detector?'BarcodeDetector+jsQR':(jsqrReady?'jsQR':'NONE')));
+                'decoder='+describeDecoders());
   }
 }
 
@@ -1013,12 +1212,17 @@ document.getElementById('photo').onchange=e=>{
 };
 
 // --- log panel + self test --------------------------------------------------
+document.getElementById('debugToggle').onclick=()=>{
+  const d=document.getElementById('debug'),b=document.getElementById('debugToggle');
+  const hidden=d.classList.toggle('hidden');
+  b.textContent=hidden?'\u2699 DEBUG':'\u2699 HIDE DEBUG';
+};
 document.getElementById('logToggle').onclick=()=>{
   const box=document.getElementById('logBox'),btn=document.getElementById('logToggle'),
         cp=document.getElementById('logCopy');
   const hidden=box.classList.toggle('hidden');
   cp.classList.toggle('hidden',hidden);
-  btn.textContent=hidden?'\u25be SHOW LOG':'\u25b4 HIDE LOG';
+  btn.textContent=hidden?'\u25be SHOW SCAN TRACE':'\u25b4 HIDE SCAN TRACE';
   if(!hidden)uiLog('i',['--- log opened ---']);
 };
 document.getElementById('logCopy').onclick=async()=>{
@@ -1029,7 +1233,7 @@ document.getElementById('logCopy').onclick=async()=>{
 document.getElementById('selftest').onclick=()=>{
   document.getElementById('logBox').classList.remove('hidden');
   document.getElementById('logCopy').classList.remove('hidden');
-  document.getElementById('logToggle').textContent='\u25b4 HIDE LOG';
+  document.getElementById('logToggle').textContent='\u25b4 HIDE SCAN TRACE';
   runSelfTest();
 };
 
@@ -1094,6 +1298,7 @@ setTimeout(()=>{
   if(stream)return;
   console.warn(LOG,'autostart did not produce a stream - user gesture required');
   setDiag('dCam','not started - press START CAMERA');
+  setAuto('Camera not started','bad','\u2014','Open DEBUG \u2192 START CAMERA and allow camera access.');
   const st=document.getElementById('lastSt');
   if(st&&!everSent){
     st.textContent='Press START CAMERA and allow camera access.';
