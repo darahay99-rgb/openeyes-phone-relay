@@ -36,11 +36,13 @@ This file implements precisely the endpoints the existing viewer client in
   GET  /scan?session={sid}                  phone scanner page (pairing QR target)
   POST /api/session/{sid}/scan              phone submits a Board ID
   GET  /static/jsQR.js                      vendored QR decoder for the phone page
+  GET  /static/probe-qr.png                 known-good QR for the on-phone self test
 """
 
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import os
 import re
@@ -51,9 +53,15 @@ from urllib.parse import urlparse, parse_qs
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    Response,
+    StreamingResponse,
+)
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.3.0"
 
 app = FastAPI(title="OpenEyes Phone Relay", version=APP_VERSION)
 
@@ -185,12 +193,17 @@ def _normalize_board_id(raw: str) -> str:
 @app.get("/health")
 def health():
     _sweep()
+    jsqr = STATIC_DIR / "jsQR.js"
     return {
         "ok": True,
         "service": "openeyes-phone-relay",
         "version": APP_VERSION,
         "sessions": len(SESSIONS),
         "uptime_s": int(time.time() - START_TIME),
+        # If jsqr_bytes is 0 or missing, static/jsQR.js did not reach the
+        # deployment and the camera fallback cannot work. Check this first.
+        "jsqr_present": jsqr.is_file(),
+        "jsqr_bytes": jsqr.stat().st_size if jsqr.is_file() else 0,
     }
 
 
@@ -211,6 +224,29 @@ def root():
         "<b>PAIR PHONE</b>, then scan the pairing QR it shows.</p>"
         "<p><a href='/health'>/health</a></p></div>"
     )
+
+
+@app.get("/static/probe-qr.png")
+def static_probe_qr():
+    """A known-good QR the phone can decode with no camera involved.
+
+    It carries a fixed, obviously-fake id so it can never be mistaken for a
+    real board. If the phone can decode this but not a printed label, the
+    decoder is fine and the problem is optics: focus, glare, or label size.
+    """
+    import qrcode
+    import qrcode.image.pure
+
+    img = qrcode.make(
+        "OPENEYES-SELFTEST-0001",
+        image_factory=qrcode.image.pure.PyPNGImage,
+        border=4,
+        box_size=6,
+    )
+    buf = io.BytesIO()
+    img.save(buf)
+    return Response(content=buf.getvalue(), media_type="image/png",
+                    headers={"Cache-Control": "no-store"})
 
 
 @app.get("/static/jsQR.js")
@@ -371,7 +407,10 @@ def scan_page(session: str = ""):
         return HTMLResponse(_PAGE_EXPIRED, status_code=404)
     live.phone_paired = True
     live.touch()
-    return HTMLResponse(_scanner_page(session))
+    return HTMLResponse(
+        _scanner_page(session),
+        headers={"Cache-Control": "no-store, must-revalidate"},
+    )
 
 
 _PAGE_BAD_SESSION = (
@@ -396,7 +435,11 @@ _PAGE_EXPIRED = (
 
 
 def _scanner_page(session_id: str) -> str:
-    return _SCANNER_TEMPLATE.replace("__SESSION__", json.dumps(session_id))
+    return (
+        _SCANNER_TEMPLATE
+        .replace("__SESSION__", json.dumps(session_id))
+        .replace("__BUILD__", f"relay {APP_VERSION}")
+    )
 
 
 _SCANNER_TEMPLATE = r"""<!doctype html><html><head><meta charset="utf-8">
@@ -429,9 +472,22 @@ button{padding:13px 16px;border-radius:11px;border:0;background:#2f6fd0;color:#f
 button.sec{background:#2a2a30}
 button:active{opacity:.75}
 .hint{font-size:12.5px;color:#8a8a94;line-height:1.6;margin-top:16px}
+#diag{margin-top:14px;background:#0a0a0c;border:1px solid #24242a;border-radius:12px;
+  padding:10px 12px;font-size:12.5px;line-height:1.9}
+#diag div{display:flex;gap:10px;align-items:baseline}
+#diag .dk{color:#8a8a94;flex:0 0 96px}
+#diag .dv{color:#d6d6de;font-family:ui-monospace,Menlo,Consolas,monospace;
+  word-break:break-all;flex:1}
+#verBadge{font-size:11px;font-weight:600;color:#0d0d0f;background:#7ee787;
+  border-radius:6px;padding:2px 7px;margin-left:7px;vertical-align:middle}
+#logBox{margin-top:10px;background:#050506;border:1px solid #24242a;border-radius:10px;
+  padding:10px;font-size:11px;line-height:1.6;color:#c8c8d2;max-height:40vh;
+  overflow:auto;white-space:pre-wrap;word-break:break-all;
+  font-family:ui-monospace,Menlo,Consolas,monospace}
+#logBox .e{color:#ff7b72}#logBox .w{color:#e3b341}
 .hidden{display:none}
 </style></head><body>
-<header><h1>OpenEyes Board Scanner</h1><div id="link">PC: <b id="linkState">connecting…</b></div></header>
+<header><h1>OpenEyes Board Scanner <span id="verBadge">__BUILD__</span></h1><div id="link">PC: <b id="linkState">connecting…</b></div></header>
 
 <div id="wrap"><video id="v" playsinline muted autoplay></video><div id="frame"></div></div>
 
@@ -441,6 +497,20 @@ button:active{opacity:.75}
     <div class="id" id="lastId">—</div>
     <div class="st wait" id="lastSt">Point the camera at a printed board label.</div>
   </div>
+
+  <div id="diag">
+    <div><span class="dk">Camera</span><span class="dv" id="dCam">starting…</span></div>
+    <div><span class="dk">Decoder</span><span class="dv" id="dDec">probing…</span></div>
+    <div><span class="dk">QR detected</span><span class="dv" id="dRaw">—</span></div>
+    <div><span class="dk">Board ID</span><span class="dv" id="dId">—</span></div>
+    <div><span class="dk">Relay send</span><span class="dv" id="dSend">—</span></div>
+    <div><span class="dk">Build</span><span class="dv" id="dBuild">__BUILD__</span></div>
+  </div>
+
+  <button id="logToggle" class="sec" style="width:100%;margin-top:10px">▾ SHOW LOG</button>
+  <pre id="logBox" class="hidden"></pre>
+  <div class="row"><button id="logCopy" class="sec hidden">⧉ COPY LOG</button>
+       <button id="selftest" class="sec">⚙ SELF TEST</button></div>
 
   <div class="row">
     <input id="manual" placeholder="Or type a Board ID" autocomplete="off"
@@ -462,44 +532,148 @@ button:active{opacity:.75}
   </div>
 </main>
 
-<canvas id="c" class="hidden"></canvas>
 <script src="/static/jsQR.js"></script>
 <script>
 const SESSION=__SESSION__;
-const video=document.getElementById('v'),canvas=document.getElementById('c'),
-      ctx=canvas.getContext('2d',{willReadFrequently:true}),
+const LOG='[OpenEyes QR]';
+
+// --- on-screen log ----------------------------------------------------------
+// A phone has no DevTools, so a JavaScript error here is completely invisible:
+// the camera simply never starts and nothing explains why. Everything logged
+// below is mirrored into a panel the user can open and copy.
+const LOGLINES=[];
+function uiLog(kind,parts){
+  const t=new Date().toTimeString().slice(0,8);
+  const msg=parts.map(x=>{
+    if(x instanceof Error)return x.name+': '+x.message;
+    if(typeof x==='object'){try{return JSON.stringify(x)}catch(e){return String(x)}}
+    return String(x);
+  }).join(' ');
+  LOGLINES.push({t,kind,msg});
+  if(LOGLINES.length>200)LOGLINES.shift();
+  const box=document.getElementById('logBox');
+  if(box){
+    box.innerHTML=LOGLINES.map(l=>
+      '<span class="'+(l.kind==='e'?'e':l.kind==='w'?'w':'')+'">'+
+      l.t+' '+l.msg.replace(/[<&]/g,c=>c==='<'?'&lt;':'&amp;')+'</span>').join('\n');
+    box.scrollTop=box.scrollHeight;
+  }
+}
+(function(){
+  const orig={log:console.log,warn:console.warn,error:console.error};
+  console.log=function(){orig.log.apply(console,arguments);uiLog('i',[].slice.call(arguments))};
+  console.warn=function(){orig.warn.apply(console,arguments);uiLog('w',[].slice.call(arguments))};
+  console.error=function(){orig.error.apply(console,arguments);uiLog('e',[].slice.call(arguments))};
+  // A silent uncaught error is the single most likely reason the camera never
+  // starts, so surface it in the panel AND in the status line.
+  window.addEventListener('error',e=>{
+    uiLog('e',['UNCAUGHT',(e.message||'error'),'@',(e.filename||'?')+':'+(e.lineno||0)]);
+    const st=document.getElementById('lastSt');
+    if(st){st.textContent='Script error: '+(e.message||'unknown')+' - open SHOW LOG';st.className='st bad'}
+  });
+  window.addEventListener('unhandledrejection',e=>{
+    const r=e&&e.reason;
+    uiLog('e',['UNHANDLED PROMISE',(r&&(r.message||r.name))||String(r)]);
+  });
+  uiLog('i',['[OpenEyes QR] page loaded, build __BUILD__']);
+  uiLog('i',['[OpenEyes QR] UA',navigator.userAgent]);
+  uiLog('i',['[OpenEyes QR] secureContext='+window.isSecureContext,
+             'origin='+location.origin]);
+})();
+const video=document.getElementById('v'),
       lastId=document.getElementById('lastId'),lastSt=document.getElementById('lastSt'),
       linkState=document.getElementById('linkState');
-let stream=null,scanning=false,lastSent='',lastSentAt=0;
+
+// Offscreen canvas, created in JS and never attached to the document. A
+// display:none canvas works too, but an unattached one removes any doubt
+// about layout/CSS ever influencing the pixel buffer we hand to jsQR.
+const canvas=document.createElement('canvas');
+const ctx=canvas.getContext('2d',{willReadFrequently:true});
+
+let stream=null,starting=false,scanning=false,loopRunning=false,decodeBusy=false,
+    lastSent='',lastSentAt=0,everSent=false,lastDecodeAt=0;
+
+// Native BarcodeDetector: fastest and most tolerant on Samsung Internet
+// and Chrome for Android. Probed once; if the probe or the detector
+// itself misbehaves we fall through to jsQR permanently.
+let detector=null,detectorEmpty=0,detectorErrors=0,dupLogged='',jsqrReady=false,decodeCount=0;
+const DECODE_INTERVAL_MS=100;      // ~10 decodes/sec is plenty and cheap
+const SAME_ID_COOLDOWN_MS=2000;    // duplicate protection
+const MAX_DECODE_EDGE=1280;        // cap the buffer we hand to jsQR
 
 function setState(t,cls){linkState.textContent=t;linkState.className=cls||''}
 function setResult(id,msg,cls){
   if(id)lastId.textContent=id;
   lastSt.textContent=msg;lastSt.className='st '+(cls||'wait');
 }
+function setDiag(id,text){const el=document.getElementById(id);if(el)el.textContent=text}
+function setScanningIdle(){
+  // Never clobber a successful "Sent to PC" line with routine scan chatter.
+  if(!everSent)setResult('','Scanning\u2026 point the camera at a board label.','wait');
+}
 
-// --- send a Board ID to the relay ------------------------------------------
-async function send(id,source){
-  id=String(id||'').trim();
+// --- Board ID normalization -------------------------------------------------
+// Identical rules to labelIdFromScanValue() in the PC viewer: a bare Board
+// ID passes through untouched (this is what printed labels contain and
+// always will), a legacy URL with ?part= has the ID lifted out, and a small
+// JSON payload is read defensively. No loose or fuzzy matching, ever.
+function labelIdFromScanValue(value){
+  const v=String(value||'').trim();
+  try{const u=new URL(v,location.href);const part=u.searchParams.get('part');if(part)return part.trim()}catch(e){}
+  if(v.startsWith('{')){try{const j=JSON.parse(v);const c=j.id||j.label||j.labelId;if(c)return String(c).trim()}catch(e){}}
+  return v;
+}
+
+// --- send a Board ID to the relay -------------------------------------------
+async function send(rawValue,source){
+  const id=labelIdFromScanValue(rawValue);
   if(!id)return;
-  // Debounce: the camera sees the same label ~30x/second.
   const now=Date.now();
-  if(id===lastSent&&now-lastSentAt<2500)return;
+  // Duplicate protection: the camera sees the same label dozens of times
+  // per second. A DIFFERENT id is always sent immediately.
+  if(id===lastSent&&now-lastSentAt<SAME_ID_COOLDOWN_MS){
+    // Log once per streak, not once per frame.
+    if(dupLogged!==id){dupLogged=id;console.log(LOG,'Duplicate ignored:',id)}
+    return;
+  }
+  dupLogged='';
   lastSent=id;lastSentAt=now;
-  setResult(id,'Sending…','wait');
+  console.log(LOG,'Detected:',id);
+  console.log(LOG,'Sending:',id);
+  setResult(id,'Sending\u2026','wait');
   try{
     const r=await fetch('/api/session/'+encodeURIComponent(SESSION)+'/scan',{
       method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({board_id:id,source:source||'phone'})
     });
-    if(r.status===404){setState('session expired','bad');setResult(id,'Pairing expired — rescan the PC pairing QR.','bad');return}
-    if(!r.ok){const j=await r.json().catch(()=>({}));setResult(id,'Rejected: '+(j.detail||r.status),'bad');return}
+    if(r.status===404){
+      setState('session expired','bad');
+      setResult(id,'Pairing expired \u2014 rescan the PC pairing QR.','bad');
+      setDiag('dSend','FAILED (session expired)');
+      console.warn(LOG,'Session expired');
+      return;
+    }
+    if(!r.ok){
+      const j=await r.json().catch(()=>({}));
+      setResult(id,'Rejected: '+(j.error||j.detail||r.status),'bad');
+      setDiag('dSend','FAILED ('+(j.error||j.detail||r.status)+')');
+      console.warn(LOG,'Rejected:',id,j);
+      // Let the user retry the same label straight away.
+      lastSent='';
+      return;
+    }
+    everSent=true;
     setState('connected','ok');
-    setResult(id,'Sent to the PC ✓','ok');
+    setResult(id,'Sent to PC \u2713','ok');
+    setDiag('dSend','OK ('+id+')');
+    console.log(LOG,'Sent successfully');
     if(navigator.vibrate)navigator.vibrate(60);
   }catch(e){
+    lastSent='';
     setState('offline','bad');
-    setResult(id,'Network error — check signal and try again.','bad');
+    setResult(id,'Network error \u2014 check signal and try again.','bad');
+    setDiag('dSend','FAILED (network)');
+    console.warn(LOG,'Send failed:',e&&e.message);
   }
 }
 
@@ -508,73 +682,399 @@ document.getElementById('send').onclick=()=>{
   const v=el.value.trim();
   if(!v)return;
   lastSent='';                       // manual entry always goes through
+  setDiag('dRaw',v);setDiag('dId',labelIdFromScanValue(v));
   send(v,'manual');el.value='';
 };
 document.getElementById('manual').addEventListener('keydown',e=>{
   if(e.key==='Enter')document.getElementById('send').click();
 });
 
-// --- live camera scanning ---------------------------------------------------
+// --- one decode helper, shared by the live camera and the photo fallback ----
+// Decodes the WHOLE frame. No region-of-interest cropping: the green box is
+// a framing aid for the user, not a decode boundary. CSS pixels on a
+// cover-fitted <video> do not map linearly onto native video pixels, so
+// cropping to it risks decoding the wrong part of the image. Reliability
+// beats the small CPU saving.
+function decodeWithJsQR(source,nativeW,nativeH){
+  if(typeof jsQR!=='function')return null;
+  if(!nativeW||!nativeH)return null;
+  // Only downscale if the frame is genuinely larger than the cap; never
+  // upscale, and never use CSS/client dimensions.
+  let w=nativeW,h=nativeH;
+  const longest=Math.max(w,h);
+  if(longest>MAX_DECODE_EDGE){
+    const k=MAX_DECODE_EDGE/longest;
+    w=Math.max(1,Math.round(w*k));
+    h=Math.max(1,Math.round(h*k));
+  }
+  if(canvas.width!==w)canvas.width=w;
+  if(canvas.height!==h)canvas.height=h;
+  try{
+    ctx.drawImage(source,0,0,w,h);
+    const img=ctx.getImageData(0,0,w,h);
+    const code=jsQR(img.data,img.width,img.height,{inversionAttempts:'attemptBoth'});
+    return code&&code.data?code.data:null;
+  }catch(e){
+    // Log once rather than swallowing silently every frame — a silent
+    // catch here is exactly what hid the previous failure.
+    if(!decodeWithJsQR._warned){decodeWithJsQR._warned=true;console.warn(LOG,'jsQR decode error:',e&&e.message)}
+    return null;
+  }
+}
+
+async function decodeFrame(){
+  // Two decoders, tried in order, ON THE SAME FRAME. This is the whole fix.
+  //
+  // The previous build returned null as soon as BarcodeDetector produced an
+  // empty result, so jsQR was never reached. On Samsung Internet and several
+  // Android WebViews, BarcodeDetector is present, getSupportedFormats()
+  // truthfully reports 'qr_code', and detect() then returns [] forever. The
+  // decoder reported itself available, the camera ran, and nothing was ever
+  // decoded -- exactly the reported symptom. An empty result is now treated
+  // as "this decoder did not find it", never as "there is nothing there".
+  if(detector){
+    let hits=null;
+    try{
+      hits=await detector.detect(video);
+    }catch(e){
+      detectorErrors++;
+      if(detectorErrors<=3)console.warn(LOG,'BarcodeDetector error:',e&&e.message);
+    }
+    if(hits&&hits.length&&hits[0].rawValue){
+      detectorEmpty=0;
+      setDiag('dDec','BarcodeDetector');
+      return hits[0].rawValue;
+    }
+    detectorEmpty++;
+    // Roughly 8 seconds of finding nothing, or repeated throws, and we stop
+    // paying for the native call every frame and let jsQR own the loop.
+    if(detectorEmpty>=80||detectorErrors>=5){
+      detector=null;
+      console.warn(LOG,'BarcodeDetector produced nothing -> jsQR only');
+      setDiag('dDec', jsqrReady?'jsQR (BarcodeDetector gave up)':'jsQR NOT LOADED');
+    }
+    // fall through to jsQR on this same frame
+  }
+
+  const raw=decodeWithJsQR(video,video.videoWidth,video.videoHeight);
+  if(raw)setDiag('dDec','jsQR');
+  return raw;
+}
+
+// --- camera ------------------------------------------------------------------
+async function ensureJsQR(){
+  // The <script src="/static/jsQR.js"> tag above should already have defined
+  // window.jsQR. If it did not (file missing from the deployment, blocked,
+  // truncated), say so on screen instead of silently degrading -- a silent
+  // failure here is indistinguishable from "the QR is unreadable".
+  if(typeof jsQR==='function'){jsqrReady=true;return true}
+  console.warn(LOG,'jsQR missing after page load - retrying once');
+  const ok=await new Promise(resolve=>{
+    const tag=document.createElement('script');
+    tag.src='/static/jsQR.js?retry='+Date.now();
+    tag.onload=()=>resolve(typeof jsQR==='function');
+    tag.onerror=()=>resolve(false);
+    document.head.appendChild(tag);
+    setTimeout(()=>resolve(typeof jsQR==='function'),8000);
+  });
+  jsqrReady=ok;
+  if(!ok)console.error(LOG,'jsQR not loaded - check /static/jsQR.js on the relay');
+  return ok;
+}
+
+async function probeDetector(){
+  try{
+    if(!('BarcodeDetector' in window)){
+      console.log(LOG,'BarcodeDetector unavailable -> jsQR');
+      return;
+    }
+    const formats=await window.BarcodeDetector.getSupportedFormats();
+    if(!formats||formats.indexOf('qr_code')<0){
+      console.log(LOG,'BarcodeDetector has no qr_code format -> jsQR');
+      return;
+    }
+    detector=new window.BarcodeDetector({formats:['qr_code']});
+    console.log(LOG,'BarcodeDetector available');
+  }catch(e){
+    detector=null;
+    console.log(LOG,'BarcodeDetector probe failed -> jsQR:',e&&e.message);
+  }
+}
+
+function describeDecoders(){
+  if(detector&&jsqrReady)return 'BarcodeDetector + jsQR';
+  if(detector)return 'BarcodeDetector (jsQR NOT loaded)';
+  if(jsqrReady)return 'jsQR';
+  return 'Decoder error: jsQR not loaded';
+}
+
+function waitForVideoDimensions(){
+  // Do NOT gate on readyState===HAVE_ENOUGH_DATA. On Android/Samsung a live
+  // MediaStream frequently sits at HAVE_CURRENT_DATA (2) forever, which
+  // makes a strict ===4 check block every decode while the preview renders
+  // perfectly. Real readiness for pixel capture is videoWidth/videoHeight.
+  return new Promise(resolve=>{
+    const ready=()=>video.videoWidth>0&&video.videoHeight>0;
+    if(ready())return resolve(true);
+    let tries=0;
+    const check=()=>{
+      if(ready())return resolve(true);
+      if(++tries>200)return resolve(false);   // ~10s
+      setTimeout(check,50);
+    };
+    video.addEventListener('loadedmetadata',()=>{if(ready())resolve(true)},{once:true});
+    check();
+  });
+}
+
 async function startCamera(){
-  if(stream)return;
+  if(stream||starting)return;
+  starting=true;
+  try{ await startCameraInner() } finally { starting=false }
+}
+
+async function startCameraInner(){
+  // Log the preconditions. If any of these is false, getUserMedia can never
+  // succeed and the failure would otherwise look identical to "camera opened
+  // but decoding failed".
+  console.log(LOG,'startCamera: secureContext='+window.isSecureContext,
+              'mediaDevices='+!!(navigator.mediaDevices),
+              'getUserMedia='+!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia));
+  if(!window.isSecureContext){
+    setDiag('dCam','blocked (not HTTPS)');
+    setResult('','Camera needs HTTPS. Open the relay https:// address, not an IP.','bad');
+    console.error(LOG,'not a secure context - getUserMedia is unavailable');
+    return;
+  }
+  if(!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia)){
+    setDiag('dCam','unsupported browser');
+    setResult('','This browser has no camera API. Open the link in Chrome.','bad');
+    console.error(LOG,'navigator.mediaDevices.getUserMedia missing');
+    return;
+  }
+  setDiag('dCam','requesting permission…');
   try{
     stream=await navigator.mediaDevices.getUserMedia({
       video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}},
       audio:false
     });
     video.srcObject=stream;
-    await video.play();
+    video.setAttribute('playsinline','');
+    try{await video.play()}catch(e){/* some browsers resolve play() late */}
+
+    const ok=await waitForVideoDimensions();
+    if(!ok){
+      console.error(LOG,'Video never reported dimensions');
+      setResult('','Camera started but produced no frames. Use PHOTO or type the ID.','bad');
+      return;
+    }
+    console.log(LOG,'Camera ready '+video.videoWidth+'x'+video.videoHeight);
+    setDiag('dCam','running '+video.videoWidth+'x'+video.videoHeight);
+
+    // Continuous autofocus where the device exposes it; harmless if not.
+    try{
+      const track=stream.getVideoTracks()[0];
+      const caps=track.getCapabilities?track.getCapabilities():{};
+      if(caps.focusMode&&caps.focusMode.indexOf('continuous')>=0){
+        await track.applyConstraints({advanced:[{focusMode:'continuous'}]});
+      }
+    }catch(e){/* optional */}
+
+    await probeDetector();
+    await ensureJsQR();
+    setDiag('dDec',describeDecoders());
+    if(!detector&&!jsqrReady){
+      setResult('','Decoder error: jsQR not loaded. Reload the page, or type the Board ID.','bad');
+      return;
+    }
+
     scanning=true;
-    document.getElementById('camBtn').textContent='⏹ STOP CAMERA';
-    setResult('','Camera on. Fill the green box with the QR.','wait');
-    requestAnimationFrame(tick);
+    document.getElementById('camBtn').textContent='\u23f9 STOP CAMERA';
+    setScanningIdle();
+    startLoop();
   }catch(e){
-    setResult('','Camera unavailable ('+(e&&e.name||'error')+'). Use PHOTO or type the ID.','bad');
+    stream=null;
+    console.error(LOG,'Camera error:',e&&e.name,e&&e.message);
+    const name=(e&&e.name)||'error';
+    const msg=(name==='NotAllowedError')
+      ? 'Camera permission denied. Allow camera access for this site, then press START CAMERA.'
+      : (name==='NotFoundError')
+      ? 'No camera found on this device. Use PHOTO or type the Board ID.'
+      : 'Camera unavailable ('+name+'). Use PHOTO or type the Board ID.';
+    setResult('',msg,'bad');
+    setDiag('dCam','failed ('+name+')');
   }
 }
+
 function stopCamera(){
   scanning=false;
   if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}
   video.srcObject=null;
-  document.getElementById('camBtn').textContent='📷 START CAMERA';
+  document.getElementById('camBtn').textContent='\ud83d\udcf7 START CAMERA';
+  setDiag('dCam','stopped');
+  console.log(LOG,'Camera stopped');
 }
 document.getElementById('camBtn').onclick=()=>{stream?stopCamera():startCamera()};
 
-function tick(){
-  if(!scanning)return;
-  if(video.readyState===video.HAVE_ENOUGH_DATA&&video.videoWidth){
-    const w=Math.min(640,video.videoWidth),
-          h=Math.round(video.videoHeight*(w/video.videoWidth));
-    canvas.width=w;canvas.height=h;
-    ctx.drawImage(video,0,0,w,h);
-    try{
-      const img=ctx.getImageData(0,0,w,h);
-      const code=jsQR(img.data,w,h,{inversionAttempts:'attemptBoth'});
-      if(code&&code.data)send(code.data,'camera');
-    }catch(e){/* frame not ready */}
+// --- single scan loop --------------------------------------------------------
+// startLoop() is idempotent: loopRunning guarantees exactly one rAF chain no
+// matter how many times the camera is toggled, and decodeBusy prevents
+// overlapping async BarcodeDetector calls from stacking up.
+function startLoop(){
+  if(loopRunning)return;
+  loopRunning=true;
+  // requestVideoFrameCallback fires once per DECODED video frame and is the
+  // most reliable signal on Android that pixels are actually available. Where
+  // it is missing we fall back to requestAnimationFrame. Exactly one chain
+  // runs either way.
+  if(typeof video.requestVideoFrameCallback==='function'){
+    console.log(LOG,'Scan loop: requestVideoFrameCallback');
+    video.requestVideoFrameCallback(onFrame);
+  }else{
+    console.log(LOG,'Scan loop: requestAnimationFrame');
+    requestAnimationFrame(tick);
   }
-  requestAnimationFrame(tick);
 }
 
-// --- single photo fallback --------------------------------------------------
+function schedule(){
+  if(!scanning){loopRunning=false;return}
+  if(typeof video.requestVideoFrameCallback==='function')video.requestVideoFrameCallback(onFrame);
+  else requestAnimationFrame(tick);
+}
+
+async function onFrame(){ await pump(); schedule() }
+async function tick(){ await pump(); schedule() }
+
+async function pump(){
+  if(!scanning)return;
+  const now=Date.now();
+  if(decodeBusy)return;
+  if(now-lastDecodeAt<DECODE_INTERVAL_MS)return;
+  // Real readiness for pixel capture is the frame size, never readyState===4:
+  // a live MediaStream on Android commonly sits at HAVE_CURRENT_DATA forever.
+  if(!(video.videoWidth>0&&video.videoHeight>0&&video.readyState>=2))return;
+
+  decodeBusy=true;lastDecodeAt=now;decodeCount++;
+  try{
+    const raw=await decodeFrame();
+    if(raw){
+      setDiag('dRaw',raw);
+      const id=labelIdFromScanValue(raw);
+      setDiag('dId',id||'(empty)');
+      send(raw,'camera');
+    }else{
+      setScanningIdle();
+    }
+  }catch(e){
+    console.warn(LOG,'decode loop error:',e&&e.message);
+  }finally{
+    decodeBusy=false;
+  }
+  // Proof-of-life every ~50 decode attempts (~5s). Without this, "decoding and
+  // finding nothing" and "loop not running at all" look identical on screen.
+  if(decodeCount%50===0){
+    console.log(LOG,'scanning... attempts='+decodeCount,
+                'frame='+video.videoWidth+'x'+video.videoHeight,
+                'decoder='+(detector?'BarcodeDetector+jsQR':(jsqrReady?'jsQR':'NONE')));
+  }
+}
+
+// --- single photo fallback ---------------------------------------------------
+// Shares decodeWithJsQR() with the live path, so any future fix helps both.
 document.getElementById('photoBtn').onclick=()=>document.getElementById('photo').click();
 document.getElementById('photo').onchange=e=>{
   const f=e.target.files&&e.target.files[0];e.target.value='';
   if(!f)return;
+  setResult('','Reading photo\u2026','wait');
+  const url=URL.createObjectURL(f);
   const img=new Image();
-  img.onload=()=>{
-    const w=Math.min(1280,img.width),h=Math.round(img.height*(w/img.width));
-    canvas.width=w;canvas.height=h;
-    ctx.drawImage(img,0,0,w,h);
-    const d=ctx.getImageData(0,0,w,h);
-    const code=jsQR(d.data,w,h,{inversionAttempts:'attemptBoth'});
-    if(code&&code.data){lastSent='';send(code.data,'photo')}
-    else setResult('','No QR found in that photo. Try again, closer and steadier.','bad');
-    URL.revokeObjectURL(img.src);
+  img.onload=async()=>{
+    let raw=null;
+    if(detector){
+      try{
+        const hits=await detector.detect(img);
+        if(hits&&hits.length&&hits[0].rawValue)raw=hits[0].rawValue;
+      }catch(err){/* fall through to jsQR */}
+    }
+    if(!raw)raw=decodeWithJsQR(img,img.naturalWidth||img.width,img.naturalHeight||img.height);
+    URL.revokeObjectURL(url);
+    if(raw){
+      console.log(LOG,'Detected (photo):',raw);
+      setDiag('dRaw',raw);setDiag('dId',labelIdFromScanValue(raw));
+      lastSent='';                    // an explicit photo always goes through
+      send(raw,'photo');
+    }else{
+      console.log(LOG,'No QR found in photo');
+      setResult('','No QR found in that photo. Try again, closer and steadier.','bad');
+    }
   };
-  img.onerror=()=>setResult('','Could not read that image.','bad');
-  img.src=URL.createObjectURL(f);
+  img.onerror=()=>{URL.revokeObjectURL(url);setResult('','Could not read that image.','bad')};
+  img.src=url;
 };
+
+// --- log panel + self test --------------------------------------------------
+document.getElementById('logToggle').onclick=()=>{
+  const box=document.getElementById('logBox'),btn=document.getElementById('logToggle'),
+        cp=document.getElementById('logCopy');
+  const hidden=box.classList.toggle('hidden');
+  cp.classList.toggle('hidden',hidden);
+  btn.textContent=hidden?'\u25be SHOW LOG':'\u25b4 HIDE LOG';
+  if(!hidden)uiLog('i',['--- log opened ---']);
+};
+document.getElementById('logCopy').onclick=async()=>{
+  const text=LOGLINES.map(l=>l.t+' ['+l.kind+'] '+l.msg).join('\n');
+  try{await navigator.clipboard.writeText(text);setDiag('dSend','log copied')}
+  catch(e){uiLog('w',['clipboard blocked - select the text manually'])}
+};
+document.getElementById('selftest').onclick=()=>{
+  document.getElementById('logBox').classList.remove('hidden');
+  document.getElementById('logCopy').classList.remove('hidden');
+  document.getElementById('logToggle').textContent='\u25b4 HIDE LOG';
+  runSelfTest();
+};
+
+async function runSelfTest(){
+  uiLog('i',['=== SELF TEST ===']);
+  uiLog('i',['build','__BUILD__']);
+  uiLog('i',['secureContext',window.isSecureContext,'| origin',location.origin]);
+  uiLog('i',['jsQR typeof',typeof jsQR,'| jsqrReady',jsqrReady]);
+  uiLog('i',['BarcodeDetector in window',('BarcodeDetector' in window)]);
+  try{
+    if('BarcodeDetector' in window)
+      uiLog('i',['supported formats',await window.BarcodeDetector.getSupportedFormats()]);
+  }catch(e){uiLog('e',['getSupportedFormats threw',e])}
+  uiLog('i',['detector active',!!detector,'| detectorEmpty',detectorEmpty,
+             '| detectorErrors',detectorErrors]);
+  uiLog('i',['camera stream',!!stream,'| scanning',scanning,'| loopRunning',loopRunning]);
+  uiLog('i',['video',video.videoWidth+'x'+video.videoHeight,
+             '| readyState',video.readyState,
+             '| rVFC',typeof video.requestVideoFrameCallback==='function']);
+  uiLog('i',['decodes attempted',decodeCount,'| last decode ms ago',
+             lastDecodeAt?(Date.now()-lastDecodeAt):'never']);
+  // Prove the relay leg independently of the camera.
+  try{
+    const r=await fetch('/api/session/'+encodeURIComponent(SESSION)+'/keepalive',{method:'POST'});
+    const j=await r.json().catch(()=>({}));
+    uiLog(r.ok?'i':'e',['relay keepalive',r.status,JSON.stringify(j)]);
+  }catch(e){uiLog('e',['relay unreachable',e])}
+  // Prove jsQR can decode a known-good QR with no camera involved.
+  try{
+    const ok=await decodeProbeImage();
+    uiLog(ok?'i':'e',['jsQR decode probe',ok?('OK -> '+ok):'FAILED']);
+  }catch(e){uiLog('e',['decode probe threw',e])}
+  uiLog('i',['=== END SELF TEST ===']);
+}
+
+// Renders a real QR on a canvas from the server and decodes it, so a failing
+// decoder can be told apart from a failing camera or an unreadable label.
+async function decodeProbeImage(){
+  if(typeof jsQR!=='function')return null;
+  const img=await new Promise((res,rej)=>{
+    const i=new Image();i.onload=()=>res(i);i.onerror=rej;
+    i.src='/static/probe-qr.png?t='+Date.now();
+  });
+  return decodeWithJsQR(img,img.naturalWidth,img.naturalHeight);
+}
 
 // --- pairing heartbeat ------------------------------------------------------
 async function ping(){
@@ -585,8 +1085,21 @@ async function ping(){
 }
 ping();setInterval(ping,15000);
 
-// Autostart the camera; HTTPS from Railway means this is allowed.
+// Autostart. Some browsers only grant the camera after a user gesture, so if
+// the stream is not running shortly after load we stop pretending and tell the
+// user to press the button rather than leaving a black rectangle on screen.
+console.log(LOG,'attempting camera autostart');
 startCamera();
+setTimeout(()=>{
+  if(stream)return;
+  console.warn(LOG,'autostart did not produce a stream - user gesture required');
+  setDiag('dCam','not started - press START CAMERA');
+  const st=document.getElementById('lastSt');
+  if(st&&!everSent){
+    st.textContent='Press START CAMERA and allow camera access.';
+    st.className='st wait';
+  }
+},3500);
 </script></body></html>"""
 
 
