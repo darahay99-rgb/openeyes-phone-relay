@@ -74,25 +74,29 @@ header small{display:block;margin-top:2px;color:#aaa;font-size:10px;font-weight:
 .rightBar button{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;padding:10px 4px;font-size:10px;min-height:68px;width:100%}
 .rightBar button .icon{font-size:19px;line-height:1}
 .rightBar button.active{background:#0b57d0;border-color:#4c8dff;color:#fff}
-/* ---- Phone rail: TikTok-style icons ---------------------------------------
+/* ---- Phone rail: minimal floating icons -----------------------------------
    Narrow screens only, so the PC viewer keeps its labelled buttons. The rail
-   loses its panel and border and floats over the 3D: no background box, no
-   text, just icons. The model gets the full width of the screen, which
-   matters most on a phone held in portrait. A drop shadow keeps the glyphs
-   readable over both the white cabinet and the dark background.            */
+   has no panel, no border and no text: just small icons floating over the 3D
+   so the model keeps almost the whole screen. A drop shadow keeps them legible
+   over both the white cabinet and the dark background.                      */
 @media (max-width:820px){
-  :root{--sidebar-w:60px}
-  .rightBar{background:transparent;border-left:none;padding:6px 4px;gap:14px;
-    justify-content:center;pointer-events:none}
-  .rightBar button{background:transparent;border:none;min-height:0;padding:4px 0;
-    width:100%;gap:0;pointer-events:auto;
-    filter:drop-shadow(0 1px 3px rgba(0,0,0,.95)) drop-shadow(0 0 1px rgba(0,0,0,.8))}
+  :root{--sidebar-w:42px}
+  .rightBar{background:transparent;border-left:none;padding:4px 2px;gap:9px;
+    justify-content:center;overflow:visible;pointer-events:none}
+  .rightBar button{background:transparent;border:none;min-height:0;padding:2px 0;
+    width:100%;gap:0;color:#e8e8e8;pointer-events:auto;
+    filter:drop-shadow(0 1px 3px rgba(0,0,0,.95)) drop-shadow(0 0 1px rgba(0,0,0,.9))}
   .rightBar button .lbl{display:none}
-  .rightBar button .icon{font-size:27px}
-  .rightBar button:active{transform:scale(.88)}
-  /* Active tool is shown by a tinted glyph rather than a filled box. */
+  .rightBar button .icon{font-size:20px}
+  .rightBar button:active{transform:scale(.85)}
+  /* Active tool is a tinted glyph rather than a filled box. */
   .rightBar button.active{background:transparent;border:none;color:#4c8dff;
-    filter:drop-shadow(0 0 6px rgba(76,141,255,.85))}
+    filter:drop-shadow(0 0 6px rgba(76,141,255,.9))}
+  /* Panels and the header must not eat the screen either. */
+  header{padding:4px 9px;min-height:42px;font-size:12px;background:#000000c9;
+    border-bottom:none}
+  .panel{max-height:30vh;background:#000000dd}
+}
 }
 .panel{position:absolute;z-index:8;left:0;right:var(--sidebar-w);bottom:0;max-height:24vh;overflow:auto;padding:7px 9px;border:1px solid #2c2c2c;border-top-width:1px;border-left:none;border-right:none;border-bottom:none;background:#000000b3;box-shadow:0 -4px 16px #0009;transition:max-height .15s ease,right .15s ease}
 .panel.collapsed{max-height:36px;overflow:hidden}
