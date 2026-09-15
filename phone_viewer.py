@@ -395,6 +395,44 @@ function closeActiveSection(){
   else if(activeMainSection==='hide')hideModeActive=false;
   activeMainSection=null;setMainSectionActive(null)
 }
+
+// --- UI geometry tracing ----------------------------------------------------
+// Prints where a bottom panel and each of its rows actually ended up. This
+// exists because "the buttons are gone" has three very different causes that
+// look identical on a screenshot: the panel never opened, the panel opened
+// but sits off-screen, or the panel opened and scrolled its own controls out
+// of view. One dump separates them. Enable with ?uidebug=1 or by running
+// OE_UI_DEBUG=true in the console.
+let OE_UI_DEBUG=/[?&]uidebug=1/.test(location.search);
+function tracePanel(id,why){
+  if(!OE_UI_DEBUG)return;
+  const el=document.getElementById(id);
+  if(!el){console.warn('[OE-UI]',id,'DOES NOT EXIST');return}
+  const r=el.getBoundingClientRect(),cs=getComputedStyle(el);
+  console.log('[OE-UI] ---- '+id+' ('+why+') ----');
+  console.log('[OE-UI] class="'+el.className+'" display='+cs.display+
+              ' maxH='+cs.maxHeight+' overflowY='+cs.overflowY);
+  console.log('[OE-UI] rect top='+Math.round(r.top)+' bottom='+Math.round(r.bottom)+
+              ' h='+Math.round(r.height)+'  window h='+innerHeight);
+  console.log('[OE-UI] scrollTop='+el.scrollTop+' scrollH='+el.scrollHeight+
+              ' clientH='+el.clientHeight+
+              (el.scrollTop>0?'   <-- SCROLLED: controls are above the fold':''));
+  if(r.top>=innerHeight)console.warn('[OE-UI] panel is BELOW the window bottom');
+  if(r.height===0)console.warn('[OE-UI] panel has ZERO height');
+  [...el.children].forEach((c,i)=>{
+    const cr=c.getBoundingClientRect(),ccs=getComputedStyle(c);
+    console.log('[OE-UI]   child'+i+' <'+c.tagName.toLowerCase()+
+      (c.id?' id='+c.id:'')+(c.className?' class="'+c.className+'"':'')+'>'+
+      ' display='+ccs.display+' top='+Math.round(cr.top)+' h='+Math.round(cr.height)+
+      (ccs.display==='none'?'   <-- HIDDEN':'')+
+      (cr.height===0?'   <-- ZERO HEIGHT':'')+
+      (cr.top<r.top-1?'   <-- ABOVE the panel, clipped':''));
+  });
+  const view=document.getElementById('view');
+  if(view)console.log('[OE-UI] #view top='+getComputedStyle(view).top+
+                      ' bottom='+getComputedStyle(view).bottom);
+}
+
 function openMainSection(name){
   if(activeMainSection&&activeMainSection!==name)closeActiveSection();
   activeMainSection=name;setMainSectionActive(name);
@@ -403,6 +441,8 @@ function openMainSection(name){
   else if(name==='search'){show('searchPanel')}
   else if(name==='door'){show('doorPanel');requireDoorMotionOrWarn()}
   else if(name==='hide'){hideModeActive=true;toast.textContent='👁 Tap any board to hide it'}
+  const panelId={animation:'animationPanel',dimension:'dimensionPanel',search:'searchPanel',door:'doorPanel'}[name];
+  if(panelId){tracePanel(panelId,'opened');requestAnimationFrame(()=>tracePanel(panelId,'after layout'))}
 }
 // Sidebar buttons are now true section selectors, not panel visibility
 // toggles. Re-clicking the already-selected section keeps its bottom panel
