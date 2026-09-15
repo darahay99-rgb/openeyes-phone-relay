@@ -2763,7 +2763,12 @@ document.getElementById('scan').onclick=startScan;
     setStatus('warn',retry?'Reconnecting…':'Waiting');
     try{
       await ensureSession();
-      showPairingQr();
+      // The pairing QR is no longer drawn here: it is produced by
+      // publishToPhone() when the panel is opened, because it now carries the
+      // published project link rather than a session id. Calling the removed
+      // the removed pairing-QR helper here threw on every connect, was caught
+      // and reported as "relay unavailable", putting the viewer in a 30s
+      // reconnect loop that never recovered.
       if(transport==='poll')connectPoll();else connectSse();
     }catch(e){
       setStatus('bad','Offline');
