@@ -74,29 +74,25 @@ header small{display:block;margin-top:2px;color:#aaa;font-size:10px;font-weight:
 .rightBar button{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;padding:10px 4px;font-size:10px;min-height:68px;width:100%}
 .rightBar button .icon{font-size:19px;line-height:1}
 .rightBar button.active{background:#0b57d0;border-color:#4c8dff;color:#fff}
-/* ---- Phone rail: minimal floating icons -----------------------------------
+/* ---- Phone rail: TikTok-style icons ---------------------------------------
    Narrow screens only, so the PC viewer keeps its labelled buttons. The rail
-   has no panel, no border and no text: just small icons floating over the 3D
-   so the model keeps almost the whole screen. A drop shadow keeps them legible
-   over both the white cabinet and the dark background.                      */
+   loses its panel and border and floats over the 3D: no background box, no
+   text, just icons. The model gets the full width of the screen, which
+   matters most on a phone held in portrait. A drop shadow keeps the glyphs
+   readable over both the white cabinet and the dark background.            */
 @media (max-width:820px){
-  :root{--sidebar-w:42px}
-  .rightBar{background:transparent;border-left:none;padding:4px 2px;gap:9px;
-    justify-content:center;overflow:visible;pointer-events:none}
-  .rightBar button{background:transparent;border:none;min-height:0;padding:2px 0;
-    width:100%;gap:0;color:#e8e8e8;pointer-events:auto;
-    filter:drop-shadow(0 1px 3px rgba(0,0,0,.95)) drop-shadow(0 0 1px rgba(0,0,0,.9))}
+  :root{--sidebar-w:60px}
+  .rightBar{background:transparent;border-left:none;padding:6px 4px;gap:14px;
+    justify-content:center;pointer-events:none}
+  .rightBar button{background:transparent;border:none;min-height:0;padding:4px 0;
+    width:100%;gap:0;pointer-events:auto;
+    filter:drop-shadow(0 1px 3px rgba(0,0,0,.95)) drop-shadow(0 0 1px rgba(0,0,0,.8))}
   .rightBar button .lbl{display:none}
-  .rightBar button .icon{font-size:20px}
-  .rightBar button:active{transform:scale(.85)}
-  /* Active tool is a tinted glyph rather than a filled box. */
+  .rightBar button .icon{font-size:27px}
+  .rightBar button:active{transform:scale(.88)}
+  /* Active tool is shown by a tinted glyph rather than a filled box. */
   .rightBar button.active{background:transparent;border:none;color:#4c8dff;
-    filter:drop-shadow(0 0 6px rgba(76,141,255,.9))}
-  /* Panels and the header must not eat the screen either. */
-  header{padding:4px 9px;min-height:42px;font-size:12px;background:#000000c9;
-    border-bottom:none}
-  .panel{max-height:30vh;background:#000000dd}
-}
+    filter:drop-shadow(0 0 6px rgba(76,141,255,.85))}
 }
 .panel{position:absolute;z-index:8;left:0;right:var(--sidebar-w);bottom:0;max-height:24vh;overflow:auto;padding:7px 9px;border:1px solid #2c2c2c;border-top-width:1px;border-left:none;border-right:none;border-bottom:none;background:#000000b3;box-shadow:0 -4px 16px #0009;transition:max-height .15s ease,right .15s ease}
 .panel.collapsed{max-height:36px;overflow:hidden}
@@ -359,11 +355,6 @@ function setSelectedBoard(part){
 function clearSelectedBoard(){if(selectedPart){(partMap.get(selectedPart.id)||[]).forEach(restoreNode);selectedPart=null}}
 function selectPart(id){
   const p=manifest.parts.find(x=>x.id===id);if(!p)return;selectedId=id;
-  // show('infoPanel') hides every other panel, which used to wipe out the
-  // whole bottom toolbar (SCAN QR / PAIR PHONE / Search / Print) the moment a
-  // board was selected - by deep link, by scanning a label, or by tapping.
-  // Remember the tool we were in so closing the info card returns to it.
-  if(activeMainSection)lastMainSection=activeMainSection;
   setSelectedBoard(p);
   const nodes=partMap.get(id)||nodesFor(id);
   if(nodes.length)fitWithContext(nodes[0]);
@@ -372,25 +363,8 @@ function selectPart(id){
   show('infoPanel');history.replaceState(null,'',location.pathname+'?part='+encodeURIComponent(id))
 }
 function esc(x){return String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}function num(x){return Number(x||0).toFixed(1)}function mmText(x){return `${Number(x||0).toLocaleString(undefined,{maximumFractionDigits:1})} mm`}
-function show(id){['animationPanel','dimensionPanel','searchPanel','doorPanel','infoPanel','scanPanel','pairPanel'].forEach(x=>{const el=document.getElementById(x);if(x!==id){el.style.removeProperty('display');el.classList.add('hidden')}});const target=document.getElementById(id);target.style.removeProperty('display');target.classList.remove('hidden','collapsed');target.scrollTop=0;applyViewInset()}
-function restoreActiveMainPanel(){
-  // Safety net for the exact UI failure where SEARCH stays blue/active but
-  // its bottom controls disappear. Temporary overlays (scanner/info/pair)
-  // are allowed to cover the main panel; as soon as the overlay closes, the
-  // panel belonging to the still-active right-rail tool is restored.
-  if(['infoPanel','scanPanel','pairPanel'].some(x=>!document.getElementById(x).classList.contains('hidden')))return;
-  const panelId={animation:'animationPanel',dimension:'dimensionPanel',search:'searchPanel',door:'doorPanel'}[activeMainSection];
-  if(panelId&&document.getElementById(panelId).classList.contains('hidden')){
-    document.getElementById(panelId).classList.remove('hidden');
-    applyViewInset();
-  }
-}
-function hide(id){
-  const el=document.getElementById(id);
-  el.style.removeProperty('display');
-  el.classList.add('hidden');applyViewInset();
-  if(id==='infoPanel'||id==='scanPanel'||id==='pairPanel')queueMicrotask(restoreActiveMainPanel)
-}
+function show(id){['animationPanel','dimensionPanel','searchPanel','doorPanel','infoPanel','scanPanel','pairPanel'].forEach(x=>{if(x!==id)document.getElementById(x).classList.add('hidden')});document.getElementById(id).classList.remove('hidden');applyViewInset()}
+function hide(id){document.getElementById(id).classList.add('hidden');applyViewInset()}
 // --- Main Side Bar section switching (UI layer only) -----------------------
 // Only one of ANIMATION/DIMENSION/SEARCH/DOOR is ever open at a time; each
 // opens its own compact BOTTOM INLINE control bar (show()/hide() already
@@ -399,7 +373,7 @@ function hide(id){
 // global BACK button that closes whichever section is open, restoring
 // existing state cleanly via the SAME exit functions each section already
 // had (exitAnimation()/exitDimension()) rather than any new logic.
-let activeMainSection=null;let lastMainSection='search';
+let activeMainSection=null;
 function setMainSectionActive(name){
   document.querySelectorAll('.rightBar button').forEach(b=>b.classList.remove('active'));
   if(name)document.getElementById(name==='door'?'doorBtn':name==='hide'?'hideModeBtn':name).classList.add('active');
@@ -412,57 +386,6 @@ function closeActiveSection(){
   else if(activeMainSection==='hide')hideModeActive=false;
   activeMainSection=null;setMainSectionActive(null)
 }
-
-// --- UI geometry tracing ----------------------------------------------------
-// Prints where a bottom panel and each of its rows actually ended up. This
-// exists because "the buttons are gone" has three very different causes that
-// look identical on a screenshot: the panel never opened, the panel opened
-// but sits off-screen, or the panel opened and scrolled its own controls out
-// of view. One dump separates them. Enable with ?uidebug=1 or by running
-// OE_UI_DEBUG=true in the console.
-let OE_UI_DEBUG=/[?&]uidebug=1/.test(location.search);
-function tracePanel(id,why){
-  if(!OE_UI_DEBUG)return;
-  const el=document.getElementById(id);
-  if(!el){console.warn('[OE-UI]',id,'DOES NOT EXIST');return}
-  const r=el.getBoundingClientRect(),cs=getComputedStyle(el);
-  console.log('[OE-UI] ---- '+id+' ('+why+') ----');
-  console.log('[OE-UI] class="'+el.className+'" display='+cs.display+
-              ' maxH='+cs.maxHeight+' overflowY='+cs.overflowY);
-  console.log('[OE-UI] rect top='+Math.round(r.top)+' bottom='+Math.round(r.bottom)+
-              ' h='+Math.round(r.height)+'  window h='+innerHeight);
-  console.log('[OE-UI] scrollTop='+el.scrollTop+' scrollH='+el.scrollHeight+
-              ' clientH='+el.clientHeight+
-              (el.scrollTop>0?'   <-- SCROLLED: controls are above the fold':''));
-  if(r.top>=innerHeight)console.warn('[OE-UI] panel is BELOW the window bottom');
-  if(r.height===0)console.warn('[OE-UI] panel has ZERO height');
-  [...el.children].forEach((c,i)=>{
-    const cr=c.getBoundingClientRect(),ccs=getComputedStyle(c);
-    console.log('[OE-UI]   child'+i+' <'+c.tagName.toLowerCase()+
-      (c.id?' id='+c.id:'')+(c.className?' class="'+c.className+'"':'')+'>'+
-      ' display='+ccs.display+' top='+Math.round(cr.top)+' h='+Math.round(cr.height)+
-      (ccs.display==='none'?'   <-- HIDDEN':'')+
-      (cr.height===0?'   <-- ZERO HEIGHT':'')+
-      (cr.top<r.top-1?'   <-- ABOVE the panel, clipped':''));
-  });
-  const view=document.getElementById('view');
-  if(view)console.log('[OE-UI] #view top='+getComputedStyle(view).top+
-                      ' bottom='+getComputedStyle(view).bottom);
-}
-
-function forceMainPanelVisible(panelId){
-  if(!panelId)return;
-  const panel=document.getElementById(panelId);
-  if(!panel)return;
-  // The selected sidebar tool MUST own a visible bottom toolbar.  Older UI
-  // paths can still add .hidden/.collapsed while switching modes or after an
-  // overlay closes, which leaves the sidebar button blue but the controls
-  // missing.  Normalize the panel state every time the section opens.
-  panel.classList.remove('hidden','collapsed');
-  panel.scrollTop=0;
-  panel.style.display='block';
-  applyViewInset();
-}
 function openMainSection(name){
   if(activeMainSection&&activeMainSection!==name)closeActiveSection();
   activeMainSection=name;setMainSectionActive(name);
@@ -471,13 +394,6 @@ function openMainSection(name){
   else if(name==='search'){show('searchPanel')}
   else if(name==='door'){show('doorPanel');requireDoorMotionOrWarn()}
   else if(name==='hide'){hideModeActive=true;toast.textContent='👁 Tap any board to hide it'}
-  const panelId={animation:'animationPanel',dimension:'dimensionPanel',search:'searchPanel',door:'doorPanel'}[name];
-  if(panelId){
-    forceMainPanelVisible(panelId);
-    tracePanel(panelId,'opened');
-    requestAnimationFrame(()=>{forceMainPanelVisible(panelId);tracePanel(panelId,'after layout')});
-    setTimeout(()=>forceMainPanelVisible(panelId),80);
-  }
 }
 // Sidebar buttons are now true section selectors, not panel visibility
 // toggles. Re-clicking the already-selected section keeps its bottom panel
@@ -497,7 +413,7 @@ function toggleMainSection(name){openMainSection(name)}
 // another board without first clicking BACK. Confirmed directly: a
 // real second click on #scan timed out ("element is not visible")
 // after closing the scanner once.
-document.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>{if(b.dataset.close==='scanPanel'){closeActiveSection()}else{hide(b.dataset.close);if(b.dataset.close==='infoPanel')openMainSection(lastMainSection||'search')}stopScan()});
+document.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>{if(b.dataset.close==='scanPanel'){closeActiveSection()}else{hide(b.dataset.close)}stopScan()});
 // --- Responsive layout: keep the 3D view visible around whatever panel/
 // toolbar is actually on screen, instead of a fixed inset. -----------------
 function applyViewInset(){
@@ -2843,12 +2759,7 @@ document.getElementById('scan').onclick=startScan;
     setStatus('warn',retry?'Reconnecting…':'Waiting');
     try{
       await ensureSession();
-      // The pairing QR is no longer drawn here: it is produced by
-      // publishToPhone() when the panel is opened, because it now carries the
-      // published project link rather than a session id. Calling the removed
-      // the removed pairing-QR helper here threw on every connect, was caught
-      // and reported as "relay unavailable", putting the viewer in a 30s
-      // reconnect loop that never recovered.
+      showPairingQr();
       if(transport==='poll')connectPoll();else connectSse();
     }catch(e){
       setStatus('bad','Offline');
@@ -2897,12 +2808,7 @@ Promise.all([fetch(manifestUrl,{cache:'no-cache'}).then(r=>r.json()),modelLoad,r
   document.getElementById('fallbackBanner').classList.toggle('hidden',!manifest.fallbackWholeCabinet);
   applyViewInset();
   toast.textContent=`Ready • ${ordered.length}/${(manifest.parts||[]).length} boards mapped`;
-  find();
-  // Start in the Search tool so the bottom toolbar is on screen from the
-  // first frame, instead of only after the user discovers the SEARCH button.
-  openMainSection('search');
-  if(initialPart)selectPart(initialPart);
-  modelReady=true
+  find();if(initialPart)selectPart(initialPart);modelReady=true
 }).catch(e=>{toast.textContent='❌ 3D Preview could not load';console.error(e)});
 __SW_REGISTER__
 </script></body></html>'''
