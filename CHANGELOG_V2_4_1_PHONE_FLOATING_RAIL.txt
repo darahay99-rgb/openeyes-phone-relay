@@ -1,0 +1,5 @@
+OpenEyes Relay V2.4.1 - Phone Floating Rail
+
+- Mobile right-side buttons reduced to compact icon-only controls (36x34 px).
+- 3D canvas extends behind the floating rail; no reserved right-side strip on phones.
+- QR Full URL / deep-link behavior remains unchanged from V2.4.0.

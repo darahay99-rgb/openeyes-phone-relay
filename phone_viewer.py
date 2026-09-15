@@ -81,18 +81,24 @@ header small{display:block;margin-top:2px;color:#aaa;font-size:10px;font-weight:
    matters most on a phone held in portrait. A drop shadow keeps the glyphs
    readable over both the white cabinet and the dark background.            */
 @media (max-width:820px){
-  :root{--sidebar-w:60px}
-  .rightBar{background:transparent;border-left:none;padding:6px 4px;gap:14px;
-    justify-content:center;pointer-events:none}
-  .rightBar button{background:transparent;border:none;min-height:0;padding:4px 0;
-    width:100%;gap:0;pointer-events:auto;
-    filter:drop-shadow(0 1px 3px rgba(0,0,0,.95)) drop-shadow(0 0 1px rgba(0,0,0,.8))}
+  /* PHONE: the tool rail must NOT reserve layout space. The 3D canvas now
+     runs edge-to-edge behind it; only the small glyph itself catches taps. */
+  :root{--sidebar-w:0px}
+  .rightBar{top:52px;right:3px;bottom:auto;width:38px;max-height:calc(100vh - 60px);
+    background:transparent;border-left:none;padding:2px 0;gap:6px;
+    justify-content:flex-start;overflow:visible;pointer-events:none}
+  .rightBar button{background:rgba(0,0,0,.08);border:none;border-radius:7px;
+    min-height:30px;height:34px;padding:2px 0;width:36px;gap:0;pointer-events:auto;
+    backdrop-filter:blur(1px);-webkit-backdrop-filter:blur(1px);
+    filter:drop-shadow(0 1px 2px rgba(0,0,0,.95)) drop-shadow(0 0 1px rgba(0,0,0,.8))}
   .rightBar button .lbl{display:none}
-  .rightBar button .icon{font-size:27px}
-  .rightBar button:active{transform:scale(.88)}
-  /* Active tool is shown by a tinted glyph rather than a filled box. */
-  .rightBar button.active{background:transparent;border:none;color:#4c8dff;
-    filter:drop-shadow(0 0 6px rgba(76,141,255,.85))}
+  .rightBar button .icon{font-size:21px;line-height:1}
+  .rightBar button:active{transform:scale(.86)}
+  /* Active tool stays transparent: blue glow only, never a solid block. */
+  .rightBar button.active{background:rgba(0,0,0,.10);border:none;color:#4c8dff;
+    filter:drop-shadow(0 0 5px rgba(76,141,255,.9))}
+  /* Keep the phone-link chip clear of the floating tool rail. */
+  #phoneChip{right:46px;max-width:50vw}
 }
 .panel{position:absolute;z-index:8;left:0;right:var(--sidebar-w);bottom:0;max-height:24vh;overflow:auto;padding:7px 9px;border:1px solid #2c2c2c;border-top-width:1px;border-left:none;border-right:none;border-bottom:none;background:#000000b3;box-shadow:0 -4px 16px #0009;transition:max-height .15s ease,right .15s ease}
 .panel.collapsed{max-height:36px;overflow:hidden}
