@@ -372,7 +372,7 @@ function selectPart(id){
   show('infoPanel');history.replaceState(null,'',location.pathname+'?part='+encodeURIComponent(id))
 }
 function esc(x){return String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}function num(x){return Number(x||0).toFixed(1)}function mmText(x){return `${Number(x||0).toLocaleString(undefined,{maximumFractionDigits:1})} mm`}
-function show(id){['animationPanel','dimensionPanel','searchPanel','doorPanel','infoPanel','scanPanel','pairPanel'].forEach(x=>{if(x!==id)document.getElementById(x).classList.add('hidden')});document.getElementById(id).classList.remove('hidden');applyViewInset()}
+function show(id){['animationPanel','dimensionPanel','searchPanel','doorPanel','infoPanel','scanPanel','pairPanel'].forEach(x=>{const el=document.getElementById(x);if(x!==id){el.style.removeProperty('display');el.classList.add('hidden')}});const target=document.getElementById(id);target.style.removeProperty('display');target.classList.remove('hidden','collapsed');target.scrollTop=0;applyViewInset()}
 function restoreActiveMainPanel(){
   // Safety net for the exact UI failure where SEARCH stays blue/active but
   // its bottom controls disappear. Temporary overlays (scanner/info/pair)
@@ -386,7 +386,9 @@ function restoreActiveMainPanel(){
   }
 }
 function hide(id){
-  document.getElementById(id).classList.add('hidden');applyViewInset();
+  const el=document.getElementById(id);
+  el.style.removeProperty('display');
+  el.classList.add('hidden');applyViewInset();
   if(id==='infoPanel'||id==='scanPanel'||id==='pairPanel')queueMicrotask(restoreActiveMainPanel)
 }
 // --- Main Side Bar section switching (UI layer only) -----------------------
@@ -448,6 +450,19 @@ function tracePanel(id,why){
                       ' bottom='+getComputedStyle(view).bottom);
 }
 
+function forceMainPanelVisible(panelId){
+  if(!panelId)return;
+  const panel=document.getElementById(panelId);
+  if(!panel)return;
+  // The selected sidebar tool MUST own a visible bottom toolbar.  Older UI
+  // paths can still add .hidden/.collapsed while switching modes or after an
+  // overlay closes, which leaves the sidebar button blue but the controls
+  // missing.  Normalize the panel state every time the section opens.
+  panel.classList.remove('hidden','collapsed');
+  panel.scrollTop=0;
+  panel.style.display='block';
+  applyViewInset();
+}
 function openMainSection(name){
   if(activeMainSection&&activeMainSection!==name)closeActiveSection();
   activeMainSection=name;setMainSectionActive(name);
@@ -457,7 +472,12 @@ function openMainSection(name){
   else if(name==='door'){show('doorPanel');requireDoorMotionOrWarn()}
   else if(name==='hide'){hideModeActive=true;toast.textContent='👁 Tap any board to hide it'}
   const panelId={animation:'animationPanel',dimension:'dimensionPanel',search:'searchPanel',door:'doorPanel'}[name];
-  if(panelId){tracePanel(panelId,'opened');requestAnimationFrame(()=>tracePanel(panelId,'after layout'))}
+  if(panelId){
+    forceMainPanelVisible(panelId);
+    tracePanel(panelId,'opened');
+    requestAnimationFrame(()=>{forceMainPanelVisible(panelId);tracePanel(panelId,'after layout')});
+    setTimeout(()=>forceMainPanelVisible(panelId),80);
+  }
 }
 // Sidebar buttons are now true section selectors, not panel visibility
 // toggles. Re-clicking the already-selected section keeps its bottom panel
