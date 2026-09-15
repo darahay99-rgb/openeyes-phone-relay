@@ -359,6 +359,11 @@ function setSelectedBoard(part){
 function clearSelectedBoard(){if(selectedPart){(partMap.get(selectedPart.id)||[]).forEach(restoreNode);selectedPart=null}}
 function selectPart(id){
   const p=manifest.parts.find(x=>x.id===id);if(!p)return;selectedId=id;
+  // show('infoPanel') hides every other panel, which used to wipe out the
+  // whole bottom toolbar (SCAN QR / PAIR PHONE / Search / Print) the moment a
+  // board was selected - by deep link, by scanning a label, or by tapping.
+  // Remember the tool we were in so closing the info card returns to it.
+  if(activeMainSection)lastMainSection=activeMainSection;
   setSelectedBoard(p);
   const nodes=partMap.get(id)||nodesFor(id);
   if(nodes.length)fitWithContext(nodes[0]);
@@ -377,7 +382,7 @@ function hide(id){document.getElementById(id).classList.add('hidden');applyViewI
 // global BACK button that closes whichever section is open, restoring
 // existing state cleanly via the SAME exit functions each section already
 // had (exitAnimation()/exitDimension()) rather than any new logic.
-let activeMainSection=null;
+let activeMainSection=null;let lastMainSection='search';
 function setMainSectionActive(name){
   document.querySelectorAll('.rightBar button').forEach(b=>b.classList.remove('active'));
   if(name)document.getElementById(name==='door'?'doorBtn':name==='hide'?'hideModeBtn':name).classList.add('active');
@@ -417,7 +422,7 @@ function toggleMainSection(name){openMainSection(name)}
 // another board without first clicking BACK. Confirmed directly: a
 // real second click on #scan timed out ("element is not visible")
 // after closing the scanner once.
-document.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>{if(b.dataset.close==='scanPanel'){closeActiveSection()}else{hide(b.dataset.close)}stopScan()});
+document.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>{if(b.dataset.close==='scanPanel'){closeActiveSection()}else{hide(b.dataset.close);if(b.dataset.close==='infoPanel')openMainSection(lastMainSection||'search')}stopScan()});
 // --- Responsive layout: keep the 3D view visible around whatever panel/
 // toolbar is actually on screen, instead of a fixed inset. -----------------
 function applyViewInset(){
@@ -2817,7 +2822,12 @@ Promise.all([fetch(manifestUrl,{cache:'no-cache'}).then(r=>r.json()),modelLoad,r
   document.getElementById('fallbackBanner').classList.toggle('hidden',!manifest.fallbackWholeCabinet);
   applyViewInset();
   toast.textContent=`Ready • ${ordered.length}/${(manifest.parts||[]).length} boards mapped`;
-  find();if(initialPart)selectPart(initialPart);modelReady=true
+  find();
+  // Start in the Search tool so the bottom toolbar is on screen from the
+  // first frame, instead of only after the user discovers the SEARCH button.
+  openMainSection('search');
+  if(initialPart)selectPart(initialPart);
+  modelReady=true
 }).catch(e=>{toast.textContent='❌ 3D Preview could not load';console.error(e)});
 __SW_REGISTER__
 </script></body></html>'''
