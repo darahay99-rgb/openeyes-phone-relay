@@ -69,7 +69,7 @@ from fastapi.responses import (
     StreamingResponse,
 )
 
-APP_VERSION = "2.4.0"
+APP_VERSION = "2.4.2"
 
 app = FastAPI(title="OpenEyes Phone Relay", version=APP_VERSION)
 

@@ -1,0 +1,13 @@
+OpenEyes V2.4.2 — Phone Smooth 3D + Center Gray Rail
+
+- Phone right-side toolbar is vertically centered on the screen.
+- Phone toolbar icons are smaller and neutral gray/translucent so the 3D remains visible behind them.
+- Phone renderer performance tuning:
+  * high-performance WebGL preference
+  * antialias disabled on coarse/mobile pointers
+  * device pixel ratio capped at 1.25 on phone
+  * render loop capped near 60 fps on high-refresh phones
+  * OrbitControls tuned for smoother touch damping/rotate/zoom/pan
+  * resize updates coalesced with requestAnimationFrame to avoid browser-toolbar resize jitter
+- Desktop rendering keeps DPR up to 2 and antialiasing.
+- QR Full URL / Railway publish behavior unchanged.

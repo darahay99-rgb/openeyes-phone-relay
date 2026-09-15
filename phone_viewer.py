@@ -81,24 +81,17 @@ header small{display:block;margin-top:2px;color:#aaa;font-size:10px;font-weight:
    matters most on a phone held in portrait. A drop shadow keeps the glyphs
    readable over both the white cabinet and the dark background.            */
 @media (max-width:820px){
-  /* PHONE: the tool rail must NOT reserve layout space. The 3D canvas now
-     runs edge-to-edge behind it; only the small glyph itself catches taps. */
   :root{--sidebar-w:0px}
-  .rightBar{top:52px;right:3px;bottom:auto;width:38px;max-height:calc(100vh - 60px);
-    background:transparent;border-left:none;padding:2px 0;gap:6px;
-    justify-content:flex-start;overflow:visible;pointer-events:none}
-  .rightBar button{background:rgba(0,0,0,.08);border:none;border-radius:7px;
-    min-height:30px;height:34px;padding:2px 0;width:36px;gap:0;pointer-events:auto;
-    backdrop-filter:blur(1px);-webkit-backdrop-filter:blur(1px);
-    filter:drop-shadow(0 1px 2px rgba(0,0,0,.95)) drop-shadow(0 0 1px rgba(0,0,0,.8))}
+  .rightBar{top:50%;right:3px;bottom:auto;width:32px;max-height:none;transform:translateY(-50%);
+    background:transparent;border-left:none;padding:2px 0;gap:4px;justify-content:center;overflow:visible;pointer-events:none}
+  .rightBar button{background:rgba(86,86,86,.30);border:1px solid rgba(160,160,160,.22);border-radius:6px;
+    min-height:27px;height:29px;padding:0;width:30px;gap:0;pointer-events:auto;color:#bdbdbd;
+    backdrop-filter:blur(.6px);-webkit-backdrop-filter:blur(.6px);filter:drop-shadow(0 1px 1px rgba(0,0,0,.78))}
   .rightBar button .lbl{display:none}
-  .rightBar button .icon{font-size:21px;line-height:1}
-  .rightBar button:active{transform:scale(.86)}
-  /* Active tool stays transparent: blue glow only, never a solid block. */
-  .rightBar button.active{background:rgba(0,0,0,.10);border:none;color:#4c8dff;
-    filter:drop-shadow(0 0 5px rgba(76,141,255,.9))}
-  /* Keep the phone-link chip clear of the floating tool rail. */
-  #phoneChip{right:46px;max-width:50vw}
+  .rightBar button .icon{font-size:17px;line-height:1;opacity:.92}
+  .rightBar button:active{transform:scale(.90)}
+  .rightBar button.active{background:rgba(145,145,145,.42);border-color:rgba(205,205,205,.44);color:#ededed;
+    filter:drop-shadow(0 1px 1px rgba(0,0,0,.78))}
 }
 .panel{position:absolute;z-index:8;left:0;right:var(--sidebar-w);bottom:0;max-height:24vh;overflow:auto;padding:7px 9px;border:1px solid #2c2c2c;border-top-width:1px;border-left:none;border-right:none;border-bottom:none;background:#000000b3;box-shadow:0 -4px 16px #0009;transition:max-height .15s ease,right .15s ease}
 .panel.collapsed{max-height:36px;overflow:hidden}
@@ -181,7 +174,7 @@ header small{display:block;margin-top:2px;color:#aaa;font-size:10px;font-weight:
 <script type="importmap">{"imports":{"three":"__MODULE_BASE__/build/three.module.js","three/addons/":"__MODULE_BASE__/examples/jsm/"}}</script><script type="module">
 import * as THREE from 'three';import{OrbitControls}from'three/addons/controls/OrbitControls.js';import{GLTFLoader}from'three/addons/loaders/GLTFLoader.js';import{ColladaLoader}from'three/addons/loaders/ColladaLoader.js';
 const asset=__ASSET__,projectToken=__TOKEN__,manifestUrl=__MANIFEST__,initialPart=__INITIAL_PART__,printUrl=__PRINT_URL__,relayUrl=__RELAY_URL__,pairingQrUrl=__PAIRING_QR_URL__;const host=document.getElementById('view'),toast=document.getElementById('toast');
-const scene=new THREE.Scene();scene.background=new THREE.Color(0x000000);const camera=new THREE.PerspectiveCamera(40,1,.001,10000);camera.position.set(3,2,4);const renderer=new THREE.WebGLRenderer({antialias:true});renderer.setPixelRatio(Math.min(devicePixelRatio,2));renderer.outputColorSpace=THREE.SRGBColorSpace;host.appendChild(renderer.domElement);const controls=new OrbitControls(camera,renderer.domElement);controls.enableDamping=true;scene.add(new THREE.HemisphereLight(0xffffff,0x333333,2.5));const sun=new THREE.DirectionalLight(0xffffff,2.2);sun.position.set(4,8,5);scene.add(sun);
+const scene=new THREE.Scene();scene.background=new THREE.Color(0x000000);const camera=new THREE.PerspectiveCamera(40,1,.001,10000);camera.position.set(3,2,4);const PHONE_PERF=matchMedia('(max-width:820px), (pointer:coarse)').matches;const renderer=new THREE.WebGLRenderer({antialias:!PHONE_PERF,powerPreference:'high-performance',alpha:false,stencil:false});const MAX_DPR=PHONE_PERF?1.25:2;renderer.setPixelRatio(Math.min(devicePixelRatio||1,MAX_DPR));renderer.outputColorSpace=THREE.SRGBColorSpace;host.appendChild(renderer.domElement);renderer.domElement.style.touchAction='none';const controls=new OrbitControls(camera,renderer.domElement);controls.enableDamping=true;controls.dampingFactor=PHONE_PERF ? 0.10 : 0.055;controls.rotateSpeed=PHONE_PERF ? 0.72 : 1;controls.zoomSpeed=PHONE_PERF ? 0.82 : 1;controls.panSpeed=PHONE_PERF ? 0.78 : 1;scene.add(new THREE.HemisphereLight(0xffffff,0x333333,2.5));const sun=new THREE.DirectionalLight(0xffffff,2.2);sun.position.set(4,8,5);scene.add(sun);
 let root,manifest={parts:[],dimensions:[],motions:[]},partMap=new Map(),nodeToPart=new Map(),motionMap=new Map(),nodeToMotion=new Map(),ordered=[],step=-1,timer=null,dimensionObjects=[],stream=null,selectedId='',measurePoints=[],measureTotalMm=0,mmPerUnit=1000,unitsConfirmed=false,declaredMmPerUnit=null,chainParts=[],chainObjects=[],chainResultObjects=[],modelReady=false,completedDimensionGroups=[],completedPointGroups=[],boardDimObjects=[];
 // New user-facing state (replaces the old TICK IN/TICK OUT/L-R-Top-B
 // naming). chainPlacement drives WHERE a MULTI SELECT dimension chain
@@ -224,7 +217,7 @@ let animSteps=[],stepByLabel=new Map(),animState='idle',animCurrentStep=-1,animT
 // `mode` is the live interaction state; `subMode` remembers which Dimension
 // tool (board/points) was last active so re-opening Dimension resumes it.
 let mode='idle',subMode='board';
-function resize(){const w=host.clientWidth,h=host.clientHeight;camera.aspect=w/h;camera.updateProjectionMatrix();renderer.setSize(w,h,false)}addEventListener('resize',()=>{resize();applyViewInset()});resize();
+let lastRenderW=0,lastRenderH=0,resizeRAF=0;function resize(){const w=Math.max(1,host.clientWidth|0),h=Math.max(1,host.clientHeight|0);if(w===lastRenderW&&h===lastRenderH)return;lastRenderW=w;lastRenderH=h;camera.aspect=w/h;camera.updateProjectionMatrix();renderer.setSize(w,h,false)}function queueResize(){if(resizeRAF)return;resizeRAF=requestAnimationFrame(()=>{resizeRAF=0;resize();applyViewInset()})}addEventListener('resize',queueResize,{passive:true});if(window.visualViewport)visualViewport.addEventListener('resize',queueResize,{passive:true});resize();
 // Lightweight camera tween used by fitWithContext() (Search/Scan auto-focus)
 // so the move is smooth instead of an instant jump. Orbit/zoom keep working
 // throughout and after: this only overrides camera.position/controls.target
@@ -234,7 +227,8 @@ let cameraTween=null;
 function tweenCameraTo(targetPos,targetLookAt,duration=700){
   cameraTween={startPos:camera.position.clone(),targetPos,startTarget:controls.target.clone(),targetTarget:targetLookAt,t0:performance.now(),duration}
 }
-renderer.setAnimationLoop(()=>{
+let lastFrameTime=0;const MIN_FRAME_MS=PHONE_PERF?15:0;renderer.setAnimationLoop((frameTime)=>{
+  if(MIN_FRAME_MS&&frameTime-lastFrameTime<MIN_FRAME_MS)return;lastFrameTime=frameTime;
   if(cameraTween){
     const t=Math.min(1,(performance.now()-cameraTween.t0)/cameraTween.duration);
     const e=t*t*(3-2*t); // smoothstep
