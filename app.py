@@ -69,7 +69,7 @@ from fastapi.responses import (
     StreamingResponse,
 )
 
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.4.0"
 
 app = FastAPI(title="OpenEyes Phone Relay", version=APP_VERSION)
 
@@ -763,6 +763,7 @@ def phone_viewer_page(token: str, part: str = ""):
         initial_part=part,
         manifest_url=f"/p/{token}/manifest.json",
         service_worker=True,
+        sw_url=f"/p/{token}/sw.js",
         print_url="",
         jsqr_url="/jsQR.js",
     ))

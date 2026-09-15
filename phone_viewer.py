@@ -10,6 +10,7 @@ def render_phone_viewer(
     initial_part: str = "",
     manifest_url: str | None = None,
     service_worker: bool = True,
+    sw_url: str = "",
     module_base: str = "https://unpkg.com/three@0.169.0",
     print_url: str | None = None,
     jsqr_url: str = "https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js",
@@ -37,9 +38,11 @@ def render_phone_viewer(
     different Wi-Fi network. Both default to "" so the Cloud /live flow is
     byte-for-byte unaffected, and so the Local flow degrades to exactly its
     previous behavior (manual Search only) when no relay is configured."""
+    _sw = sw_url or f"/live/sw.js"
     values = {
         "__TITLE__": html.escape(title), "__DETAIL__": html.escape(detail),
         "__ASSET__": json.dumps(asset_url),
+        "__TOKEN__": json.dumps(token),
         "__MANIFEST__": json.dumps(manifest_url if manifest_url is not None else f"/live/assets/{token}/manifest.json"),
         "__INITIAL_PART__": json.dumps(initial_part),
         "__MODULE_BASE__": module_base,
@@ -48,7 +51,11 @@ def render_phone_viewer(
         "__RELAY_URL__": json.dumps((relay_url or "").rstrip("/")),
         "__PAIRING_QR_URL__": json.dumps(pairing_qr_url or ""),
         "__SW_REGISTER__": (
-            "if('serviceWorker'in navigator)navigator.serviceWorker.register('/live/sw.js',{scope:'/live/'}).catch(()=>{});"
+            (
+                "if('serviceWorker'in navigator)navigator.serviceWorker.register("
+                f"{json.dumps(_sw)},{{scope:{json.dumps(_sw.rsplit('/', 1)[0] + '/')}}}"
+                ").catch(()=>{});"
+            )
             if service_worker else ""
         ),
     }
@@ -167,7 +174,7 @@ header small{display:block;margin-top:2px;color:#aaa;font-size:10px;font-weight:
 <script src="__JSQR_URL__"></script>
 <script type="importmap">{"imports":{"three":"__MODULE_BASE__/build/three.module.js","three/addons/":"__MODULE_BASE__/examples/jsm/"}}</script><script type="module">
 import * as THREE from 'three';import{OrbitControls}from'three/addons/controls/OrbitControls.js';import{GLTFLoader}from'three/addons/loaders/GLTFLoader.js';import{ColladaLoader}from'three/addons/loaders/ColladaLoader.js';
-const asset=__ASSET__,manifestUrl=__MANIFEST__,initialPart=__INITIAL_PART__,printUrl=__PRINT_URL__,relayUrl=__RELAY_URL__,pairingQrUrl=__PAIRING_QR_URL__;const host=document.getElementById('view'),toast=document.getElementById('toast');
+const asset=__ASSET__,projectToken=__TOKEN__,manifestUrl=__MANIFEST__,initialPart=__INITIAL_PART__,printUrl=__PRINT_URL__,relayUrl=__RELAY_URL__,pairingQrUrl=__PAIRING_QR_URL__;const host=document.getElementById('view'),toast=document.getElementById('toast');
 const scene=new THREE.Scene();scene.background=new THREE.Color(0x000000);const camera=new THREE.PerspectiveCamera(40,1,.001,10000);camera.position.set(3,2,4);const renderer=new THREE.WebGLRenderer({antialias:true});renderer.setPixelRatio(Math.min(devicePixelRatio,2));renderer.outputColorSpace=THREE.SRGBColorSpace;host.appendChild(renderer.domElement);const controls=new OrbitControls(camera,renderer.domElement);controls.enableDamping=true;scene.add(new THREE.HemisphereLight(0xffffff,0x333333,2.5));const sun=new THREE.DirectionalLight(0xffffff,2.2);sun.position.set(4,8,5);scene.add(sun);
 let root,manifest={parts:[],dimensions:[],motions:[]},partMap=new Map(),nodeToPart=new Map(),motionMap=new Map(),nodeToMotion=new Map(),ordered=[],step=-1,timer=null,dimensionObjects=[],stream=null,selectedId='',measurePoints=[],measureTotalMm=0,mmPerUnit=1000,unitsConfirmed=false,declaredMmPerUnit=null,chainParts=[],chainObjects=[],chainResultObjects=[],modelReady=false,completedDimensionGroups=[],completedPointGroups=[],boardDimObjects=[];
 // New user-facing state (replaces the old TICK IN/TICK OUT/L-R-Top-B
@@ -2556,7 +2563,7 @@ document.getElementById('scan').onclick=startScan;
     const img=document.getElementById('pairQrImg');
     setPairStatus('Uploading this cabinet to the relay…');
     try{
-      const r=await fetch('/local/publish/'+encodeURIComponent(token),{method:'POST'});
+      const r=await fetch('/local/publish/'+encodeURIComponent(projectToken),{method:'POST'});
       const j=await r.json().catch(()=>({}));
       if(!r.ok){
         img.classList.add('hidden');
@@ -2564,7 +2571,7 @@ document.getElementById('scan').onclick=startScan;
         return;
       }
       publishedPhoneUrl=j.phone_url||'';
-      img.src='/local/phone-qr.svg?project='+encodeURIComponent(token)+'&v='+encodeURIComponent(j.version||'');
+      img.src='/local/phone-qr.svg?project='+encodeURIComponent(projectToken)+'&v='+encodeURIComponent(j.version||'');
       img.classList.remove('hidden');
       const kb=Math.round((j.model_bytes||0)/1024);
       setPairStatus('Ready — '+kb+' KB published. Scan the QR with the phone camera.'
