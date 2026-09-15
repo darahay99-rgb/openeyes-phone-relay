@@ -373,7 +373,22 @@ function selectPart(id){
 }
 function esc(x){return String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}function num(x){return Number(x||0).toFixed(1)}function mmText(x){return `${Number(x||0).toLocaleString(undefined,{maximumFractionDigits:1})} mm`}
 function show(id){['animationPanel','dimensionPanel','searchPanel','doorPanel','infoPanel','scanPanel','pairPanel'].forEach(x=>{if(x!==id)document.getElementById(x).classList.add('hidden')});document.getElementById(id).classList.remove('hidden');applyViewInset()}
-function hide(id){document.getElementById(id).classList.add('hidden');applyViewInset()}
+function restoreActiveMainPanel(){
+  // Safety net for the exact UI failure where SEARCH stays blue/active but
+  // its bottom controls disappear. Temporary overlays (scanner/info/pair)
+  // are allowed to cover the main panel; as soon as the overlay closes, the
+  // panel belonging to the still-active right-rail tool is restored.
+  if(['infoPanel','scanPanel','pairPanel'].some(x=>!document.getElementById(x).classList.contains('hidden')))return;
+  const panelId={animation:'animationPanel',dimension:'dimensionPanel',search:'searchPanel',door:'doorPanel'}[activeMainSection];
+  if(panelId&&document.getElementById(panelId).classList.contains('hidden')){
+    document.getElementById(panelId).classList.remove('hidden');
+    applyViewInset();
+  }
+}
+function hide(id){
+  document.getElementById(id).classList.add('hidden');applyViewInset();
+  if(id==='infoPanel'||id==='scanPanel'||id==='pairPanel')queueMicrotask(restoreActiveMainPanel)
+}
 // --- Main Side Bar section switching (UI layer only) -----------------------
 // Only one of ANIMATION/DIMENSION/SEARCH/DOOR is ever open at a time; each
 // opens its own compact BOTTOM INLINE control bar (show()/hide() already
